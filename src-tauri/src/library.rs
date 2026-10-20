@@ -79,6 +79,9 @@ pub struct StartupInfo {
     pub root: String,
     pub fresh: bool,
     pub pending: Vec<DocPayload>,
+    /// FR-SYN-01：库位于第三方同步盘范围内时显著警告（双引擎冲突风险）
+    #[serde(default)]
+    pub thirdparty_warnings: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -158,6 +161,11 @@ fn now_secs() -> u64 {
 }
 
 fn hash_str(bytes: &[u8]) -> String {
+    hash_hex(bytes)
+}
+
+/// blake3 内容 hash（同步引擎判定权威，FR-SYN-04：内容 hash 为权威，mtime 仅提示）
+pub fn hash_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
@@ -322,6 +330,11 @@ impl Library {
         };
         lib.save_last_library();
         Ok(lib)
+    }
+
+    /// 已存在库的重建入口（同步批次后台线程用）：与 startup 不同，不写应用级配置
+    pub fn open_existing(root: &Path) -> Result<Library, AppError> {
+        Self::open(root, false)
     }
 
     fn open(root: &Path, fresh: bool) -> Result<Library, AppError> {
@@ -633,6 +646,20 @@ impl Library {
         rel: &str,
         new_title: &str,
     ) -> CmdResult<WriteResult> {
+        let (new_rel, hash, saved_at, old_rel) = self.rename_doc_inner(rel, new_title)?;
+        let _ = app.emit(
+            "doc:renamed",
+            serde_json::json!({ "from": old_rel, "to": new_rel }),
+        );
+        Ok(WriteResult {
+            path: new_rel,
+            hash,
+            saved_at,
+        })
+    }
+
+    /// 可测试内核：改标题（frontmatter）+ 必要时改文件名。返回 (新路径, hash, 时间, 旧路径)
+    pub fn rename_doc_inner(&self, rel: &str, new_title: &str) -> CmdResult<(String, String, u64, String)> {
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.resolve(rel)?;
         let bytes = fs::read(&path)?;
@@ -666,16 +693,8 @@ impl Library {
         let new_rel = self.rel_of(&new_path);
         let hash = hash_str(full.as_bytes());
         let saved_at = now_secs();
-        let _ = app.emit(
-            "doc:renamed",
-            serde_json::json!({ "from": rel, "to": new_rel }),
-        );
         // 返回新 hash：前端必须采纳，否则下一轮自动保存会假冲突（rename 重写了文件）
-        Ok(WriteResult {
-            path: new_rel,
-            hash,
-            saved_at,
-        })
+        Ok((new_rel, hash, saved_at, rel.to_string()))
     }
 
     pub fn create_folder(&self, parent_rel: &str, name: &str) -> CmdResult<TreeNode> {

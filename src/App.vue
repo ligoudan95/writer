@@ -6,7 +6,19 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import DocTree from "./components/DocTree.vue";
 import EditorPane from "./components/EditorPane.vue";
 import StatusBar from "./components/StatusBar.vue";
-import { s, init, restorePending, discardPending, flush, saveNow, createDoc } from "./store";
+import SyncSettings from "./components/SyncSettings.vue";
+import ConflictView from "./components/ConflictView.vue";
+import DirectionAsk from "./components/DirectionAsk.vue";
+import {
+  s,
+  init,
+  restorePending,
+  discardPending,
+  flush,
+  saveNow,
+  createDoc,
+  triggerSync,
+} from "./store";
 
 const bootMsg = ref("正在启动…");
 const bootErr = ref("");
@@ -84,7 +96,11 @@ async function onKey(e: KeyboardEvent) {
   const k = e.key.toLowerCase();
   if (k === "s") {
     e.preventDefault();
-    await saveNow();
+    if (e.shiftKey) {
+      await triggerSync(); // Ctrl+Shift+S 手动同步（附录 A）
+    } else {
+      await saveNow();
+    }
   } else if (k === "n") {
     e.preventDefault();
     await createDoc();
@@ -113,6 +129,13 @@ async function onKey(e: KeyboardEvent) {
       </div>
     </div>
 
+    <!-- 双引擎检测警告（FR-SYN-01：库位于第三方同步盘内） -->
+    <div v-if="s.sync.thirdpartyWarnings.length" class="thirdparty-warn">
+      ⚠ 文库位于第三方同步盘（{{ s.sync.thirdpartyWarnings.join("、") }}）范围内，两套同步引擎可能互相冲突——
+      建议移动文库位置，或停用其中一方的同步。
+      <button class="icon-btn" title="本次忽略" @click="s.sync.thirdpartyWarnings = []">✕</button>
+    </div>
+
     <aside class="sidebar">
       <DocTree />
     </aside>
@@ -120,6 +143,15 @@ async function onKey(e: KeyboardEvent) {
     <main class="main">
       <EditorPane />
     </main>
+
+    <!-- 同步设置面板（FR-SYN-01） -->
+    <SyncSettings v-if="s.sync.settingsOpen" />
+
+    <!-- 冲突对比视图（FR-SYN-04：非模态，主区上方浮层） -->
+    <ConflictView />
+
+    <!-- 首次绑定方向选择（FR-SYN-07：模态白名单） -->
+    <DirectionAsk />
 
     <StatusBar />
 

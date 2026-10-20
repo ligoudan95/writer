@@ -12,6 +12,7 @@ import {
   createDoc,
   openDoc,
   bindEditor,
+  bindEditorPos,
   updateCounts,
   openHistory,
   reloadHistory,
@@ -74,6 +75,28 @@ const editor = new Editor({
 
 onMounted(() => {
   bindEditor(() => editor.getJSON() as unknown as PMNode);
+  // 位置桥：远端更新重载时保持光标与滚动（FR-SYN-09 / A15）
+  const scroller = () => document.querySelector(".editor-scroll");
+  bindEditorPos(
+    () => {
+      try {
+        return {
+          head: editor.state.selection.head,
+          scrollTop: scroller()?.scrollTop ?? 0,
+        };
+      } catch {
+        return null;
+      }
+    },
+    (head, scrollTop) => {
+      const size = editor.state.doc.content.size;
+      const pos = Math.min(Math.max(head, 0), size);
+      editor.commands.setTextSelection(pos);
+      requestAnimationFrame(() => {
+        scroller()?.scrollTo({ top: scrollTop });
+      });
+    },
+  );
   if (s.current) applyContent();
   else updateCounts({ type: "doc", content: [] });
   editor.on("transaction", syncToolbarState);
@@ -117,6 +140,14 @@ watch(
   (nv) => {
     if (nv && s.current) applyContent();
     else editor.commands.clearContent(false);
+  },
+);
+
+// 远端更新重载（FR-SYN-09）：path 不变、内容已换 → nonce 驱动重应用（撤销栈清空）
+watch(
+  () => s.reloadNonce,
+  () => {
+    if (s.current) applyContent();
   },
 );
 

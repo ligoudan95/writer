@@ -1,5 +1,13 @@
 import { reactive } from "vue";
-import { api, type DocPayload, type SnapshotInfo, type TreeNode } from "./api";
+import {
+  api,
+  type DocPayload,
+  type SnapshotInfo,
+  type SyncConflict,
+  type SyncLogRow,
+  type SyncReport,
+  type TreeNode,
+} from "./api";
 import { docToMd, mdToDoc, type PMNode } from "./codec";
 
 export type SaveState = "saved" | "dirty" | "saving" | "error" | "conflict";
@@ -24,6 +32,23 @@ export const s = reactive({
     previewTs: 0,
   },
   exportOpen: false,
+  /** 远端更新重载信号（FR-SYN-09）：path 不变时驱动编辑器重应用内容 */
+  reloadNonce: 0,
+  // 云同步（FR-SYN，M3）
+  sync: {
+    phase: "idle" as string, // idle | scanning | planning | executing | settling
+    running: false,
+    last: null as SyncReport | null,
+    conflicts: [] as SyncConflict[],
+    history: [] as SyncLogRow[],
+    historyOpen: false,
+    settingsOpen: false,
+    // 首次绑定方向对话框（FR-SYN-07）
+    directionAsk: null as { localDocs: number; remoteDocs: number } | null,
+    thirdpartyWarnings: [] as string[],
+    /** 逐文档同步状态（FR-SYN-03 树图标数据源）：path → synced | pending */
+    docStates: {} as Record<string, string>,
+  },
 });
 
 // 编辑器桥：EditorPane 挂载后注入内容存取器（store 不依赖 TipTap）
@@ -55,6 +80,7 @@ export async function saveNow(): Promise<boolean> {
     s.savedAt = r.savedAt;
     s.saveState = "saved";
     s.saveError = "";
+    scheduleAutoSync(); // FR-SYN-03：保存后 10s 去抖自动同步
     return true;
   } catch (e: unknown) {
     const err = e as { code?: string; message?: string };
@@ -83,6 +109,19 @@ export async function flush(): Promise<boolean> {
 
 export async function refreshTree() {
   s.tree = await api.list();
+  refreshDocStates();
+}
+
+/** 逐文档同步状态（FR-SYN-03）；同步未启用时为空，不影响树渲染 */
+function refreshDocStates() {
+  void api
+    .syncDocStates()
+    .then((rows) => {
+      const m: Record<string, string> = {};
+      for (const r of rows) m[r.path] = r.state;
+      s.sync.docStates = m;
+    })
+    .catch(() => undefined);
 }
 
 /** 打开文档（先 flush；冲突时中止切换并提示）。force=true 跳过 flush——用于"重新加载磁盘版本"按钮：用户已明确选择放弃本地未保存修改 */
@@ -280,6 +319,7 @@ export async function init(onStep?: (msg: string) => void) {
   const info = await api.startup();
   s.root = info.root;
   s.pendingRecovery = info.pending;
+  s.sync.thirdpartyWarnings = info.thirdpartyWarnings ?? [];
   onStep?.("读取文档树…");
   await refreshTree();
   const first = firstDoc(s.tree);
@@ -288,6 +328,7 @@ export async function init(onStep?: (msg: string) => void) {
     await openDoc(first.id);
   }
   s.ready = true;
+  void initSync(); // 同步接线失败不影响主功能（3.3-1 离线优先）
 }
 
 /** 字数统计（FR-EDT-07 计数规则：CJK 逐字计，西文数字串计 1） */
@@ -309,3 +350,178 @@ export function updateCounts(json: PMNode) {
 }
 
 export { mdToDoc };
+
+// ---------------------------------------------------------------------------
+// 云同步（FR-SYN，M3）：自动同步去抖 / 事件监听 / 打开文档远端更新协议
+// ---------------------------------------------------------------------------
+
+// 编辑器位置桥：external_change 重载时保持光标与滚动（A15）
+let editorGetPos: () => { head: number; scrollTop: number } | null = () => null;
+let editorRestorePos: (head: number, scrollTop: number) => void = () => undefined;
+export function bindEditorPos(getPos: () => { head: number; scrollTop: number } | null, restore: (head: number, scrollTop: number) => void) {
+  editorGetPos = getPos;
+  editorRestorePos = restore;
+}
+
+let autoSyncTimer: number | undefined;
+
+/** FR-SYN-03：保存成功后 10s 去抖自动同步（输入不打扰，静默执行） */
+export function scheduleAutoSync() {
+  clearTimeout(autoSyncTimer);
+  autoSyncTimer = window.setTimeout(() => void triggerSync(), 10_000);
+}
+
+/** 手动同步（按钮 / Ctrl+Shift+S） */
+export async function triggerSync(direction?: "upload" | "download") {
+  const ack = await api.syncNow(direction);
+  if (!ack.started && ack.reason) {
+    s.toast = { msg: `同步未启动：${ack.reason}` };
+    setTimeout(() => {
+      if (s.toast?.msg.startsWith("同步未启动")) s.toast = null;
+    }, 3000);
+  }
+}
+
+/** 首次绑定方向选择（FR-SYN-07）后触发 */
+export async function chooseDirection(d: "upload" | "download") {
+  s.sync.directionAsk = null;
+  await triggerSync(d);
+}
+
+export async function reloadSyncStatus() {
+  const st = await api.syncStatus();
+  s.sync.running = st.running;
+  s.sync.phase = st.phase;
+  s.sync.last = st.last;
+  s.sync.conflicts = st.conflicts;
+}
+
+export async function openSyncHistory() {
+  s.sync.historyOpen = true;
+  s.sync.history = await api.syncHistory(200);
+}
+
+/** 冲突三动作（FR-SYN-04）：keep=false 保留此版/手动合并后清理；keep=true 保留彼版 */
+export async function resolveConflict(copyPath: string, keepRemote: boolean) {
+  await api.syncConflictResolve(copyPath, keepRemote);
+  await refreshTree();
+  await reloadSyncStatus();
+  // 原文档可能被替换（保留彼版）→ 重载
+  const orig = s.sync.conflicts.find((c) => c.copyPath === copyPath);
+  if (orig && s.current?.path === orig.path) await openDoc(orig.path, true);
+  s.toast = { msg: keepRemote ? "已保留远程版本（替换前已自动快照）" : "已保留本地版本，将于下次同步生效" };
+  setTimeout(() => {
+    if (s.toast) s.toast = null;
+  }, 3500);
+}
+
+/** doc:external_change（FR-SYN-09）：无未保存修改自动重载；有修改走冲突态 */
+async function onExternalChange(path: string, _hash: string) {
+  await refreshTree();
+  if (s.current?.path !== path) return;
+  if (s.saveState === "dirty" || s.saveState === "saving" || s.saveState === "conflict") {
+    // 有未保存输入：本地磁盘已被同步更新 → 保存护栏会在下次保存时拦截；
+    // 直接提示用户走冲突流程（V1 载体：冲突横幅 + 重新加载按钮）
+    s.saveState = "conflict";
+    s.saveError = "远端有新版本已下载到磁盘，本地有未保存修改";
+    return;
+  }
+  const pos = editorGetPos();
+  const d = await api.readDoc(path);
+  if (d.hash === s.lastReadHash) return; // 内容未变（无谓重载）
+  s.current = d;
+  s.lastReadHash = d.hash;
+  s.saveState = "saved";
+  s.saveError = "";
+  s.reloadNonce++; // path 未变 → 用 nonce 驱动编辑器重应用内容
+  if (pos) {
+    await new Promise((r) => setTimeout(r, 0)); // 等 watcher 应用内容后再恢复光标
+    editorRestorePos(pos.head, pos.scrollTop);
+  }
+  s.toast = { msg: "文档已因远端更新自动重载（撤销栈已清空）" };
+  setTimeout(() => {
+    if (s.toast?.msg.startsWith("文档已因远端")) s.toast = null;
+  }, 4000);
+}
+
+/** 启动同步接线：init() 完成后调用一次 */
+export async function initSync() {
+  try {
+    await reloadSyncStatus();
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlistens: (() => void)[] = [];
+    unlistens.push(
+      await listen<{ phase: string }>("sync:state", (e) => {
+        s.sync.phase = e.payload.phase;
+        s.sync.running = e.payload.phase !== "idle";
+      }),
+    );
+    unlistens.push(
+      await listen<{ path: string; hash: string }>("doc:external_change", (e) => {
+        void onExternalChange(e.payload.path, e.payload.hash);
+      }),
+    );
+    unlistens.push(
+      await listen<{ path: string; copyPath: string }>("sync:conflict", (e) => {
+        if (!s.sync.conflicts.some((c) => c.copyPath === e.payload.copyPath)) {
+          s.sync.conflicts.push({
+            uuid: "",
+            path: e.payload.path,
+            copyPath: e.payload.copyPath,
+          });
+        }
+        s.toast = { msg: "检测到同步冲突，已保留两个版本，请到同步面板处理" };
+        setTimeout(() => {
+          if (s.toast?.msg.startsWith("检测到同步冲突")) s.toast = null;
+        }, 6000);
+      }),
+    );
+    unlistens.push(
+      await listen<{ localDocs: number; remoteDocs: number }>("sync:needs_direction", (e) => {
+        s.sync.directionAsk = e.payload; // 非模态提示 + 显式选择（3.3-5 白名单允许）
+      }),
+    );
+    unlistens.push(
+      await listen<SyncReport>("sync:done", async (e) => {
+        s.sync.running = false;
+        s.sync.phase = "idle";
+        s.sync.last = e.payload;
+        await refreshTree();
+        await reloadSyncStatus();
+      }),
+    );
+    unlistens.push(
+      await listen<{ message: string }>("sync:error", (e) => {
+        s.sync.running = false;
+        s.toast = { msg: `同步失败：${e.payload.message}` };
+        setTimeout(() => {
+          if (s.toast?.msg.startsWith("同步失败")) s.toast = null;
+        }, 5000);
+      }),
+    );
+    unlistens.push(
+      await listen<{ path: string }>("sync:trashed", async (e) => {
+        // 对端删除传播：本端文档进回收站
+        await refreshTree();
+        if (s.current?.path === e.payload.path) s.current = null;
+      }),
+    );
+    unlistens.push(
+      await listen<{ from: string; to: string }>("doc:renamed", async (e) => {
+        // 远端改名跟随：当前打开文档路径变化
+        await refreshTree();
+        if (s.current?.path === e.payload.from) {
+          const d = await api.readDoc(e.payload.to);
+          s.current = { ...d, path: e.payload.to };
+          s.lastReadHash = d.hash;
+        }
+      }),
+    );
+    // 启动时自动同步一次（FR-SYN-03）
+    const cfg = await api.syncConfigGet();
+    if (cfg.enabled) void triggerSync();
+    return () => unlistens.forEach((u) => u());
+  } catch {
+    return () => undefined; // 同步接线失败不影响主功能（离线优先）
+  }
+}

@@ -25,6 +25,7 @@ node tests/codec-roundtrip.mjs   # md ↔ DocModel 往返无损
 node tests/exporters.mjs         # TXT/MD/DOCX/HTML 导出器（HTML 供 PDF 管线）
 node tests/pdf-spike/spike.mjs   # Paged.js 分页预研（结论见 docs/PagedJS-预研报告.md）
 cargo run -- --pdf-selftest out.pdf   # PDF 管线端到端自检（渲染舱分页 + WebView2 COM 打印）
+cargo test                          # Rust 单测 + 同步引擎双机模拟（A3/A4/A11–A14）
 ```
 
 前置条件：Node 20+、Rust stable（MSVC）、Visual Studio C++ 工具集 + Windows 11 SDK、WebView2 运行时。
@@ -36,14 +37,17 @@ docs/               需求规格说明文档（冻结基线）；PagedJS-预研�
 src/                前端（Vue 3）
   api.ts            类型化 command 门面（契约见文档 5.3）
   codec.ts          DocumentCodec：md ↔ TipTap JSON（文档 6.4）
-  store.ts          应用状态 + 自动保存引擎（2s 去抖 + 边界 flush + hash 护栏）
+  store.ts          应用状态 + 自动保存引擎 + 同步接线（事件/去抖/远端更新协议）
   exporter.ts       TXT/MD/DOCX 导出 + exportHtml（PDF 管线正文片段）
   pdfchamber.ts     PDF 渲染舱：离屏 webview 内 Paged.js 分页（FR-EXP-05）
-  components/       文档树 / 编辑器 / 状态栏 / 导出面板
+  components/       文档树 / 编辑器 / 状态栏 / 导出面板 / 同步设置 / 冲突对比 / 首绑方向
 src-tauri/          Rust 核心
   src/library.rs    LibraryService：单写者锁 + 原子写 + journal 崩溃恢复 + 回收站
   src/frontmatter.rs frontmatter 解析（保留未知键）
   src/pdf.rs        PDF 管线：渲染舱调度 + WebView2 PrintToPdf（COM 直调）
+  src/dav.rs        WebDAV 存储后端（5.1 StorageBackend）+ Mock（双机模拟回归）
+  src/secrets.rs    Secrets 服务：DPAPI 凭据加密（NFR-08）
+  src/sync.rs       同步引擎：状态机批次 / 墓碑清单 / sync_state.db / 冲突三动作
 tests/              回归测试与预研驱动（稿纸几何断言 / codec / 导出器 / PDF spike）
 ```
 

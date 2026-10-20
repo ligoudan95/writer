@@ -1,0 +1,571 @@
+//! WebDAV 存储后端（5.1 StorageBackend 契约）+ NetGateway 执行层。
+//! 后端只做无状态传输；身份识别（uuid）、删除/改名判定、冲突决策由 sync.rs 引擎统一完成。
+//! 可测试性（5.1）：MockDav 内存实现供 A3/A4/A11–A14 双机模拟回归，脱离真实网络。
+
+use std::time::Duration;
+
+use crate::library::AppError;
+
+// ---------------------------------------------------------------------------
+// 契约类型
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RemoteEntry {
+    /// 相对远端根的路径（/ 分隔，URL 已解码）
+    pub path: String,
+    pub is_dir: bool,
+    /// 服务端 etag；可为空（引擎回退为内容 hash 比对，FR-SYN-04）
+    pub etag: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestResult {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// WebDAV 连接配置（密码经 Secrets 服务按 key 读取，不在此结构中传递）
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DavConfig {
+    /// 服务器地址，如 https://dav.jianguoyun.com/dav/
+    pub url: String,
+    pub username: String,
+    /// 远程根目录（相对 url 的路径，/ 分隔）
+    pub remote_root: String,
+}
+
+// ---------------------------------------------------------------------------
+// StorageBackend 契约（5.1）：sync 引擎唯一依赖的后端接口
+// ---------------------------------------------------------------------------
+
+pub trait StorageBackend {
+    fn test_connection(&mut self) -> Result<TestResult, AppError>;
+    /// 递归列出远端根下全部条目（不含根自身；目录条目包含在内）
+    fn list_all(&mut self) -> Result<Vec<RemoteEntry>, AppError>;
+    fn get(&mut self, path: &str) -> Result<Vec<u8>, AppError>;
+    /// 返回 etag（服务端未提供时为空串）
+    fn put(&mut self, path: &str, data: &[u8]) -> Result<String, AppError>;
+    fn mv(&mut self, from: &str, to: &str) -> Result<(), AppError>;
+    fn delete(&mut self, path: &str) -> Result<(), AppError>;
+    fn ensure_dir(&mut self, path: &str) -> Result<(), AppError>;
+    /// FR-SYN-06 同步加密钩子（V1 预留：恒等变换，V2 启用）
+    #[allow(dead_code)]
+    fn transform(&self, data: &[u8]) -> Vec<u8> {
+        data.to_vec()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 真实 WebDAV 实现（reqwest blocking；NetGateway 唯一网络出口原则的执行点之一）
+// ---------------------------------------------------------------------------
+
+pub struct DavBackend {
+    client: reqwest::blocking::Client,
+    cfg: DavConfig,
+    password: String,
+    base: String,
+}
+
+impl DavBackend {
+    pub fn new(cfg: DavConfig, password: String) -> Result<Self, AppError> {
+        let url = cfg.url.trim().trim_end_matches('/').to_string();
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(AppError::new("sync_config", "服务器地址必须以 http(s):// 开头"));
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| AppError::new("net", e.to_string()))?;
+        Ok(Self {
+            base: format!("{}/{}", url, cfg.remote_root.trim_matches('/')),
+            cfg,
+            password,
+            client,
+        })
+    }
+
+    fn url_of(&self, path: &str) -> String {
+        format!("{}/{}", self.base, encode_path(path.trim_start_matches('/')))
+    }
+
+    fn auth_header(&self) -> String {
+        format!("Basic {}", b64(format!("{}:{}", self.cfg.username, self.password).as_bytes()))
+    }
+
+    fn request(&self, method: &str, url: &str, depth: Option<&str>, extra: &[(&str, String)], body: Option<Vec<u8>>) -> Result<reqwest::blocking::Response, AppError> {
+        let m = reqwest::Method::from_bytes(method.as_bytes())
+            .map_err(|e| AppError::new("net", e.to_string()))?;
+        let mut rb = self.client.request(m, url).header("Authorization", self.auth_header());
+        if let Some(d) = depth {
+            rb = rb.header("Depth", d);
+        }
+        for (k, v) in extra {
+            rb = rb.header(*k, v);
+        }
+        if let Some(b) = body {
+            rb = rb.body(b);
+        }
+        let resp = rb.send().map_err(map_net_err)?;
+        match resp.status().as_u16() {
+            200..=207 => Ok(resp),
+            401 | 403 => Err(AppError::new("sync_auth", "账号或应用密码错误（401/403）")),
+            404 => Err(AppError::new("not_found", "远端路径不存在")),
+            409 => Err(AppError::new("net_conflict", "远端状态冲突（409）")),
+            429 | 507 => Err(AppError::new("sync_rate_limited", "服务端限流或流量超限（429/507）")),
+            412 => Err(AppError::new("sync_precondition", "前置条件失败（412，可能被并发修改）")),
+            code => Err(AppError::new(
+                "net",
+                format!("服务端返回 {code} {}", resp.status().canonical_reason().unwrap_or("")),
+            )),
+        }
+    }
+}
+
+fn map_net_err(e: reqwest::Error) -> AppError {
+    if e.is_timeout() {
+        AppError::new("net_timeout", format!("网络超时：{e}"))
+    } else if e.is_connect() {
+        AppError::new("net_connect", format!("无法连接服务器：{e}"))
+    } else {
+        AppError::new("net", e.to_string())
+    }
+}
+
+impl StorageBackend for DavBackend {
+    fn test_connection(&mut self) -> Result<TestResult, AppError> {
+        // 根路径 PROPFIND Depth:0：连通 + 鉴权一并验证
+        self.request(
+            "PROPFIND",
+            &self.base.clone(),
+            Some("0"),
+            &[],
+            Some(PROPFIND_BODY.as_bytes().to_vec()),
+        )?;
+        Ok(TestResult { ok: true, message: "连接成功".into() })
+    }
+
+    fn list_all(&mut self) -> Result<Vec<RemoteEntry>, AppError> {
+        let mut out = Vec::new();
+        let mut queue = vec![String::new()]; // 远端根
+        while let Some(dir) = queue.pop() {
+            let url = if dir.is_empty() { self.base.clone() } else { self.url_of(&dir) };
+            let resp = self.request("PROPFIND", &url, Some("1"), &[], Some(PROPFIND_BODY.as_bytes().to_vec()))?;
+            let text = resp.text().map_err(|e| AppError::new("net", e.to_string()))?;
+            for entry in parse_propfind(&text) {
+                // Depth:1 首个 response 是目录自身，跳过
+                if entry.path.is_empty() {
+                    continue;
+                }
+                let full = if dir.is_empty() { entry.path.clone() } else { format!("{dir}/{}", entry.path) };
+                if entry.is_dir {
+                    queue.push(full.clone());
+                }
+                out.push(RemoteEntry {
+                    path: full,
+                    is_dir: entry.is_dir,
+                    etag: entry.etag,
+                    size: entry.size,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    fn get(&mut self, path: &str) -> Result<Vec<u8>, AppError> {
+        let resp = self.request("GET", &self.url_of(path), None, &[], None)?;
+        resp.bytes().map(|b| b.to_vec()).map_err(|e| AppError::new("net", e.to_string()))
+    }
+
+    fn put(&mut self, path: &str, data: &[u8]) -> Result<String, AppError> {
+        if let Some(parent) = parent_of(path) {
+            self.ensure_dir(&parent)?;
+        }
+        let resp = self.request("PUT", &self.url_of(path), None, &[], Some(data.to_vec()))?;
+        Ok(resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .trim_matches('"')
+            .to_string())
+    }
+
+    fn mv(&mut self, from: &str, to: &str) -> Result<(), AppError> {
+        self.request(
+            "MOVE",
+            &self.url_of(from),
+            None,
+            &[
+                ("Destination", self.url_of(to)),
+                // Overwrite:F——目标已存在时失败而非覆盖（引擎回退为冲突路径）
+                ("Overwrite", "F".to_string()),
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn delete(&mut self, path: &str) -> Result<(), AppError> {
+        self.request("DELETE", &self.url_of(path), None, &[], None)?;
+        Ok(())
+    }
+
+    fn ensure_dir(&mut self, path: &str) -> Result<(), AppError> {
+        let segs: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
+        // 逐级 MKCOL（405 = 已存在，视为成功）
+        for i in 0..segs.len() {
+            let sub = segs[..=i].join("/");
+            let r = self
+                .client
+                .request(
+                    reqwest::Method::from_bytes(b"MKCOL").unwrap(),
+                    self.url_of(&sub),
+                )
+                .header("Authorization", self.auth_header())
+                .send();
+            match r {
+                Ok(resp) if matches!(resp.status().as_u16(), 200..=207 | 405) => {}
+                Ok(resp) => {
+                    return Err(AppError::new("net", format!("MKCOL {sub} 失败：{}", resp.status())))
+                }
+                Err(e) => return Err(map_net_err(e)),
+            }
+        }
+        Ok(())
+    }
+}
+
+const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getetag/><d:getcontentlength/></d:prop></d:propfind>"#;
+
+fn parent_of(path: &str) -> Option<String> {
+    let p = path.trim_end_matches('/');
+    match p.rfind('/') {
+        Some(i) if i > 0 => Some(p[..i].to_string()),
+        _ => None,
+    }
+}
+
+/// 极简 percent-encode（保留 / 与安全字符；CJK 等按 UTF-8 百分号编码）
+fn encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => out.push(*b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// href 百分号解码（UTF-8）
+fn decode_path(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// XML 基本实体解码（etag 等）
+fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#34;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&") // amp 最后：防 &amp;quot; 双解
+}
+
+fn hex(b: Option<&u8>) -> Option<u8> {
+    match b {
+        Some(c @ b'0'..=b'9') => Some(c - b'0'),
+        Some(c @ b'a'..=b'f') => Some(c - b'a' + 10),
+        Some(c @ b'A'..=b'F') => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// 解析 PROPFIND 207 响应，返回**该目录下的直接子条目名**（前缀无关：d:/D:/无前缀）。
+/// 逐个 '<' 扫描标签按 local name 匹配，不依赖 XML 库（响应结构稳定、字段有限）。
+fn parse_propfind(xml: &str) -> Vec<RemoteEntry> {
+    let mut out = Vec::new();
+    // 按 local name "response" 切块
+    let mut blocks: Vec<&str> = Vec::new();
+    let bytes = xml.as_bytes();
+    let mut i = 0usize;
+    let mut open: Option<usize> = None;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let tag_end = match xml[i..].find('>') {
+                Some(rel) => i + rel,
+                None => break,
+            };
+            let inner = &xml[i + 1..tag_end];
+            let is_close = inner.starts_with('/');
+            let local = inner
+                .trim_start_matches('/')
+                .split(':')
+                .next_back()
+                .unwrap_or(inner);
+            if local.eq_ignore_ascii_case("response") {
+                if is_close {
+                    if let Some(start) = open.take() {
+                        blocks.push(&xml[start..tag_end + 1]);
+                    }
+                } else if open.is_none() {
+                    open = Some(i);
+                }
+            }
+            i = tag_end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    for block in blocks {
+        let Some(href) = extract_tag(block, "href") else { continue };
+        // <d:collection/> 或 <collection/>（前缀无关）
+        let lower_block = block.to_lowercase();
+        let is_dir = lower_block.contains(":collection") || lower_block.contains("<collection");
+        let etag = extract_tag(block, "getetag").unwrap_or_default();
+        let size = extract_tag(block, "getcontentlength")
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+
+        // href 可能是绝对 URL：仅取路径部分；再取最后一段 = 直接子条目名
+        let path = match href.find("://") {
+            Some(idx) => {
+                let rest = &href[idx + 3..];
+                match rest.find('/') {
+                    Some(j) => &rest[j..],
+                    None => "/",
+                }
+            }
+            None => href.as_str(),
+        };
+        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+        let name = decode_path(name);
+        if name.is_empty() {
+            continue;
+        }
+        out.push(RemoteEntry {
+            path: name,
+            is_dir,
+            etag: decode_entities(etag.trim()).trim_matches('"').to_string(),
+            size,
+        });
+    }
+    out
+}
+
+/// 提取任意命名空间前缀下 <ns:tag>…</ns:tag> 的文本（大小写不敏感，剥 CDATA）
+fn extract_tag(block: &str, tag: &str) -> Option<String> {
+    let lower = block.to_lowercase();
+    let bytes = block.as_bytes();
+    let mut i = 0usize;
+    while i < lower.len() {
+        let Some(lt) = lower[i..].find('<') else { return None };
+        let lt = i + lt;
+        let Some(gt_rel) = lower[lt..].find('>') else { return None };
+        let gt = lt + gt_rel;
+        if gt + 1 >= bytes.len() {
+            return None;
+        }
+        let inner = &block[lt + 1..gt];
+        let local = inner.split(':').next_back().unwrap_or(inner);
+        if local.eq_ignore_ascii_case(tag) {
+            // 在其后的文本中找闭合标签（local name 匹配）
+            let mut j = gt + 1;
+            while let Some(close_rel) = lower[j..].find("</") {
+                let cs = j + close_rel;
+                let Some(ce_rel) = lower[cs..].find('>') else { return None };
+                let ce = cs + ce_rel;
+                let cname = &block[cs + 2..ce];
+                let cname_local = cname.split(':').next_back().unwrap_or(cname);
+                if cname_local.eq_ignore_ascii_case(tag) {
+                    let mut text = block[gt + 1..cs].to_string();
+                    if text.contains("<![CDATA[") {
+                        text = text.replace("<![CDATA[", "").replace("]]>", "");
+                    }
+                    return Some(text.trim().to_string());
+                }
+                j = ce + 1;
+            }
+            return None;
+        }
+        i = gt + 1;
+    }
+    None
+}
+
+fn b64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Mock 后端（内存实现；A3/A4/A11–A14 双机模拟回归用）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+pub mod mock {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    pub struct MockDav {
+        pub files: BTreeMap<String, Vec<u8>>,
+        pub ops: Vec<String>,
+        fail_next: Option<AppError>,
+    }
+
+    impl MockDav {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        pub fn fail_next(&mut self, err: AppError) {
+            self.fail_next = Some(err);
+        }
+        fn check_fail(&mut self) -> Result<(), AppError> {
+            match self.fail_next.take() {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        }
+    }
+
+    impl StorageBackend for MockDav {
+        fn test_connection(&mut self) -> Result<TestResult, AppError> {
+            Ok(TestResult { ok: true, message: "mock".into() })
+        }
+
+        fn list_all(&mut self) -> Result<Vec<RemoteEntry>, AppError> {
+            let mut out: Vec<RemoteEntry> = Vec::new();
+            for (p, data) in &self.files {
+                out.push(RemoteEntry {
+                    path: p.clone(),
+                    is_dir: false,
+                    etag: crate::library::hash_hex(data),
+                    size: data.len() as u64,
+                });
+                let mut parent = p.as_str();
+                while let Some(i) = parent.rfind('/') {
+                    parent = &parent[..i];
+                    if !out.iter().any(|e| e.path == parent) {
+                        out.push(RemoteEntry { path: parent.to_string(), is_dir: true, etag: String::new(), size: 0 });
+                    }
+                }
+            }
+            Ok(out)
+        }
+
+        fn get(&mut self, path: &str) -> Result<Vec<u8>, AppError> {
+            self.check_fail()?;
+            self.files.get(path).cloned().ok_or_else(|| AppError::new("not_found", format!("mock 缺少 {path}")))
+        }
+
+        fn put(&mut self, path: &str, data: &[u8]) -> Result<String, AppError> {
+            self.check_fail()?;
+            self.ops.push(format!("put {path}"));
+            self.files.insert(path.to_string(), data.to_vec());
+            Ok(crate::library::hash_hex(data))
+        }
+
+        fn mv(&mut self, from: &str, to: &str) -> Result<(), AppError> {
+            self.check_fail()?;
+            if !self.files.contains_key(from) {
+                return Err(AppError::new("not_found", format!("mock 缺少 {from}")));
+            }
+            if self.files.contains_key(to) {
+                return Err(AppError::new("net_conflict", "MOVE 目标已存在（Overwrite:F）"));
+            }
+            let data = self.files.remove(from).unwrap();
+            self.ops.push(format!("mv {from} -> {to}"));
+            self.files.insert(to.to_string(), data);
+            Ok(())
+        }
+
+        fn delete(&mut self, path: &str) -> Result<(), AppError> {
+            self.check_fail()?;
+            self.ops.push(format!("delete {path}"));
+            self.files.remove(path);
+            Ok(())
+        }
+
+        fn ensure_dir(&mut self, _path: &str) -> Result<(), AppError> {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn propfind_parses_namespaced_multistatus() {
+        let xml = r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">
+<d:response><d:href>/dav/writer/docs/%E5%B0%8F%E8%AF%B4A/10-%E7%AC%AC%E4%B8%80%E7%AB%A0.md</d:href>
+<d:propstat><d:prop><d:resourcetype/><d:getetag>&quot;abc123&quot;</d:getetag></d:prop>
+<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+<d:response><d:href>/dav/writer/docs/%E5%B0%8F%E8%AF%B4A/</d:href>
+<d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+</d:multistatus>"#;
+        let entries = parse_propfind(xml);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "10-第一章.md");
+        assert!(!entries[0].is_dir);
+        assert_eq!(entries[0].etag, "abc123");
+        assert!(entries[1].is_dir);
+    }
+
+    #[test]
+    fn propfind_parses_no_prefix() {
+        let xml = "<multistatus><response><href>/a/b.md</href><propstat><prop><getetag>xyz</getetag></prop></propstat></response></multistatus>";
+        let entries = parse_propfind(xml);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "b.md");
+        assert_eq!(entries[0].etag, "xyz");
+    }
+
+    #[test]
+    fn percent_roundtrip_cjk() {
+        let enc = encode_path("docs/小说A/10-第一章.md");
+        assert!(enc.starts_with("docs/"));
+        assert!(!enc.contains('小'));
+        assert_eq!(decode_path(&enc), "docs/小说A/10-第一章.md");
+    }
+
+    #[test]
+    fn extract_tag_handles_cdata_and_entity() {
+        assert_eq!(extract_tag(r#"<d:getetag>&quot;abc&quot;</d:getetag>"#, "getetag").as_deref(), Some("&quot;abc&quot;"));
+        assert_eq!(extract_tag(r#"<x:getetag><![CDATA["z"]]></x:getetag>"#, "getetag").as_deref(), Some(r#""z""#));
+        assert_eq!(extract_tag(r#"<nope>1</nope>"#, "getetag"), None);
+    }
+}

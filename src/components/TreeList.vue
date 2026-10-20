@@ -7,6 +7,16 @@ const props = defineProps<{ nodes: TreeNode[]; depth: number }>();
 
 const editing = ref<{ id: string; value: string } | null>(null);
 
+/** 逐文档同步标记（FR-SYN-03）：冲突 > 待同步 > 已同步（已同步不占视觉） */
+function syncMark(path: string): { cls: string; icon: string; tip: string } | null {
+  if (s.sync.conflicts.some((c) => c.path === path || c.copyPath === path)) {
+    return { cls: "conflict", icon: "⚠", tip: "同步冲突待处理" };
+  }
+  const st = s.sync.docStates[path];
+  if (st === "pending") return { cls: "pending", icon: "●", tip: "待同步" };
+  return null;
+}
+
 function select(node: TreeNode) {
   if (node.kind === "folder") {
     s.selectedFolder = s.selectedFolder === node.id ? "" : node.id;
@@ -57,6 +67,13 @@ function onEnter(node: TreeNode, e: KeyboardEvent) {
           autofocus
         />
         <span v-else class="treeitem-name" :title="node.name">{{ node.name }}</span>
+        <span
+          v-if="node.kind === 'doc' && syncMark(node.id)"
+          class="treeitem-sync"
+          :class="syncMark(node.id)!.cls"
+          :title="syncMark(node.id)!.tip"
+          >{{ syncMark(node.id)!.icon }}</span
+        >
         <span class="treeitem-ops" @click.stop>
           <button class="icon-btn dim" title="重命名" @click="startRename(node)">✎</button>
           <button class="icon-btn dim" title="移入回收站" @click="deleteNode(node)">✕</button>

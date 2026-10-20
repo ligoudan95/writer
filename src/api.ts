@@ -24,6 +24,7 @@ export interface StartupInfo {
   root: string;
   fresh: boolean;
   pending: DocPayload[];
+  thirdpartyWarnings: string[];
 }
 
 export interface SnapshotInfo {
@@ -37,6 +38,53 @@ export interface SnapshotInfo {
 export interface ImportedFile {
   name: string;
   content: string;
+}
+
+// -- 云同步（FR-SYN，M3） ------------------------------------------------------
+
+export interface SyncConfig {
+  enabled: boolean;
+  url: string;
+  username: string;
+  remoteRoot: string;
+  hasPassword: boolean;
+  bound: boolean;
+  autoSync: boolean;
+  thirdpartyWarnings: string[];
+}
+export interface DavTestResult {
+  ok: boolean;
+  message: string;
+}
+export interface SyncConflict {
+  uuid: string;
+  path: string;
+  copyPath: string;
+}
+export interface SyncReport {
+  uploaded: number;
+  downloaded: number;
+  moved: number;
+  deletedRemote: number;
+  trashedLocal: number;
+  conflicts: SyncConflict[];
+  bytesUp: number;
+  bytesDown: number;
+  warnings: string[];
+}
+export interface SyncStatus {
+  running: boolean;
+  phase: string;
+  last: SyncReport | null;
+  conflicts: SyncConflict[];
+}
+export interface SyncLogRow {
+  time: number;
+  file: string;
+  direction: string;
+  bytes: number;
+  action: string;
+  result: string;
 }
 
 const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
@@ -74,4 +122,23 @@ export const api = {
   importRead: (path: string) => call<ImportedFile>("import_read", { path }),
   importDoc: (folder: string, filename: string, content: string) =>
     call<TreeNode>("import_doc", { folder, filename, content }),
+  // 同步（5.3 契约 sync.* 域）
+  syncConfigGet: () => call<SyncConfig>("sync_config_get"),
+  syncConfigSet: (cfg: {
+    enabled: boolean;
+    url: string;
+    username: string;
+    password?: string;
+    remoteRoot: string;
+    autoSync: boolean;
+  }) => call<SyncConfig>("sync_config_set", cfg),
+  syncTest: (url: string, username: string, password?: string, remoteRoot?: string) =>
+    call<DavTestResult>("sync_test", { url, username, password, remoteRoot }),
+  syncNow: (direction?: "upload" | "download") =>
+    call<{ started: boolean; reason: string }>("sync_now", { direction }),
+  syncStatus: () => call<SyncStatus>("sync_status"),
+  syncConflictResolve: (copyPath: string, keepRemote: boolean) =>
+    call<null>("sync_conflict_resolve", { copyPath, keepRemote }),
+  syncHistory: (limit?: number) => call<SyncLogRow[]>("sync_history", { limit }),
+  syncDocStates: () => call<{ path: string; state: string }[]>("sync_doc_states"),
 };

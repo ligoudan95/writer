@@ -1,17 +1,42 @@
+mod dav;
 mod frontmatter;
 mod library;
 mod pdf;
+mod secrets;
+mod sync;
 
 use std::sync::Mutex;
-use tauri::State;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, State};
 
+use dav::{DavBackend, StorageBackend, TestResult};
 use library::{
     AppError, CmdResult, DocPayload, Library, SnapshotInfo, StartupInfo, TreeNode, WriteResult,
 };
+use sync::{ConflictInfo, Direction, SyncDb, SyncLogRow, SyncOutcome, SyncSettings};
 
 /// 全局状态：当前打开的文库（V1 单库）
 pub struct AppState {
     pub lib: Mutex<Option<Library>>,
+}
+
+/// 同步运行时（批次互斥 + 阶段/结果缓存；命令与后台批次线程共享）
+pub struct SyncRuntime {
+    pub running: Mutex<bool>,
+    pub phase: Mutex<String>,
+    pub last: Mutex<Option<serde_json::Value>>,
+    pub conflicts: Mutex<Vec<ConflictInfo>>,
+}
+
+impl Default for SyncRuntime {
+    fn default() -> Self {
+        Self {
+            running: Mutex::new(false),
+            phase: Mutex::new("idle".into()),
+            last: Mutex::new(None),
+            conflicts: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 fn with_lib<T>(state: &State<AppState>, f: impl FnOnce(&Library) -> CmdResult<T>) -> CmdResult<T> {
@@ -30,6 +55,7 @@ fn library_startup(state: State<AppState>) -> CmdResult<StartupInfo> {
         root: lib.display_root.clone(),
         fresh: lib.fresh,
         pending: lib.journal_pending(),
+        thirdparty_warnings: sync::detect_thirdparty_sync(&lib.root),
     };
     let mut guard = state.lib.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(lib);
@@ -137,6 +163,239 @@ fn snapshot_restore(state: State<AppState>, path: String, ts: u64) -> CmdResult<
     with_lib(&state, |lib| lib.snapshot_restore(&path, ts))
 }
 
+// -- 云同步（FR-SYN，M3） ------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+struct SyncConfigView {
+    enabled: bool,
+    url: String,
+    username: String,
+    remote_root: String,
+    has_password: bool,
+    bound: bool,
+    auto_sync: bool,
+    thirdparty_warnings: Vec<String>,
+}
+
+fn sync_view(lib: &Library, s: &SyncSettings) -> SyncConfigView {
+    SyncConfigView {
+        enabled: s.enabled,
+        url: s.dav.url.clone(),
+        username: s.dav.username.clone(),
+        remote_root: s.dav.remote_root.clone(),
+        has_password: s.has_password,
+        bound: s.bound,
+        auto_sync: s.auto_sync,
+        thirdparty_warnings: sync::detect_thirdparty_sync(&lib.root),
+    }
+}
+
+#[tauri::command]
+fn sync_config_get(state: State<AppState>) -> CmdResult<SyncConfigView> {
+    with_lib(&state, |lib| {
+        let s = sync::load_settings(&lib.root);
+        Ok(sync_view(lib, &s))
+    })
+}
+
+/// 保存配置（FR-SYN-01）：密码经 DPAPI 存 Secrets，绝不入库文件；换 url/根目录重置绑定
+#[tauri::command]
+fn sync_config_set(
+    state: State<AppState>,
+    enabled: bool,
+    url: String,
+    username: String,
+    password: Option<String>,
+    remote_root: String,
+    auto_sync: bool,
+) -> CmdResult<SyncConfigView> {
+    with_lib(&state, |lib| {
+        let mut s = sync::load_settings(&lib.root);
+        if s.dav.url != url || s.dav.remote_root != remote_root {
+            s.bound = false; // 新的远端目录 = 重新走首次绑定方向确认（FR-SYN-07）
+        }
+        if let Some(pwd) = &password {
+            if !pwd.is_empty() {
+                secrets::set(&sync::secrets_key(&lib.root), pwd)?;
+                s.has_password = true;
+            }
+        }
+        s.enabled = enabled;
+        s.auto_sync = auto_sync;
+        s.dav.url = url.trim().to_string();
+        s.dav.username = username.trim().to_string();
+        s.dav.remote_root = remote_root.trim().trim_matches('/').to_string();
+        sync::save_settings(&lib.root, &s)?;
+        Ok(sync_view(lib, &s))
+    })
+}
+
+/// 测试连接（可在保存前调用）：password 为空则用已存凭据
+#[tauri::command]
+fn sync_test(
+    state: State<AppState>,
+    url: String,
+    username: String,
+    password: Option<String>,
+    remote_root: String,
+) -> CmdResult<TestResult> {
+    with_lib(&state, |lib| {
+        let pwd = match password {
+            Some(p) if !p.is_empty() => p,
+            _ => secrets::get(&sync::secrets_key(&lib.root))?.unwrap_or_default(),
+        };
+        let cfg = dav::DavConfig {
+            url,
+            username,
+            remote_root,
+        };
+        DavBackend::new(cfg, pwd)?.test_connection()
+    })
+}
+
+#[derive(Serialize)]
+struct SyncRunAck {
+    started: bool,
+    reason: String,
+}
+
+/// 触发一次同步批次（手动 / 保存后自动 / 启动时共用）。
+/// 批次在后台线程执行（B2：不阻塞输入路径），状态与结果经 sync:* 事件外显。
+#[tauri::command]
+async fn sync_now(
+    state: State<'_, AppState>,
+    rt: State<'_, std::sync::Arc<SyncRuntime>>,
+    app: AppHandle,
+    direction: Option<String>,
+) -> Result<SyncRunAck, AppError> {
+    {
+        let mut running = rt.running.lock().unwrap_or_else(|e| e.into_inner());
+        if *running {
+            return Ok(SyncRunAck { started: false, reason: "已有同步批次在进行中".into() });
+        }
+        *running = true;
+    }
+    *rt.phase.lock().unwrap_or_else(|e| e.into_inner()) = "scanning".into();
+
+    let (lib_root, settings, password) = {
+        let guard = state.lib.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(lib) = guard.as_ref() else {
+            *rt.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            return Err(AppError::new("no_library", "尚未打开文库"));
+        };
+        let s = sync::load_settings(&lib.root);
+        if !s.enabled {
+            *rt.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            return Ok(SyncRunAck { started: false, reason: "同步未启用".into() });
+        }
+        let pwd = secrets::get(&sync::secrets_key(&lib.root))?.unwrap_or_default();
+        (lib.root.clone(), s, pwd)
+    };
+    let dir = match direction.as_deref() {
+        Some("upload") => Some(Direction::Upload),
+        Some("download") => Some(Direction::Download),
+        _ => None,
+    };
+
+    let rt2 = rt.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app2 = app.clone();
+        let rt3 = rt2.clone();
+        let emitter = move |event: &str, payload: serde_json::Value| {
+            if event == "sync:state" {
+                if let Some(p) = payload.get("phase").and_then(|v| v.as_str()) {
+                    *rt3.phase.lock().unwrap_or_else(|e| e.into_inner()) = p.to_string();
+                }
+            }
+            let _ = app2.emit(event, payload);
+        };
+        let result = (|| -> Result<SyncOutcome, AppError> {
+            let lib = Library::open_existing(&lib_root)?;
+            let db = SyncDb::open(&lib_root)?;
+            let mut backend = DavBackend::new(settings.dav.clone(), password)?;
+            sync::SyncEngine::run(&lib, &db, &mut backend, &settings, dir, &emitter)
+        })();
+        match result {
+            Ok(SyncOutcome::Done(report)) => {
+                let conflicts = report.conflicts.clone();
+                let v = serde_json::to_value(&report).unwrap_or_default();
+                *rt2.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+                // 冲突累积（解决后由 sync_conflict_resolve 移除）
+                if !conflicts.is_empty() {
+                    rt2.conflicts
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend(conflicts.iter().cloned());
+                }
+                let _ = app.emit("sync:done", serde_json::to_value(&report).unwrap_or_default());
+            }
+            Ok(SyncOutcome::NeedsDirection { local_docs, remote_docs }) => {
+                let _ = app.emit(
+                    "sync:needs_direction",
+                    serde_json::json!({ "localDocs": local_docs, "remoteDocs": remote_docs }),
+                );
+            }
+            Err(e) => {
+                let _ = app.emit("sync:error", serde_json::to_value(&e).unwrap_or_default());
+            }
+        }
+        // 引擎可能已把 bound 置位并落盘，事件侧无需处理；恢复空闲
+        *rt2.phase.lock().unwrap_or_else(|e| e.into_inner()) = "idle".into();
+        *rt2.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    });
+    Ok(SyncRunAck { started: true, reason: String::new() })
+}
+
+#[derive(Serialize)]
+struct SyncStatusView {
+    running: bool,
+    phase: String,
+    last: Option<serde_json::Value>,
+    conflicts: Vec<ConflictInfo>,
+}
+
+#[tauri::command]
+fn sync_status(rt: State<'_, std::sync::Arc<SyncRuntime>>) -> CmdResult<SyncStatusView> {
+    Ok(SyncStatusView {
+        running: *rt.running.lock().unwrap_or_else(|e| e.into_inner()),
+        phase: rt.phase.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        last: rt.last.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        conflicts: rt.conflicts.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+    })
+}
+
+/// 冲突三动作（FR-SYN-04 v1.7 语义）：keep_remote=false → 保留此版/手动合并后清理；
+/// keep_remote=true → 保留彼版（替换前自动快照，uuid 还原为原文档）
+#[tauri::command]
+fn sync_conflict_resolve(
+    state: State<AppState>,
+    rt: State<'_, std::sync::Arc<SyncRuntime>>,
+    copy_path: String,
+    keep_remote: bool,
+) -> CmdResult<()> {
+    with_lib(&state, |lib| sync::resolve_conflict(lib, &copy_path, keep_remote))?;
+    let mut cs = rt.conflicts.lock().unwrap_or_else(|e| e.into_inner());
+    *cs = cs.iter().filter(|c| c.copy_path != copy_path).cloned().collect();
+    Ok(())
+}
+
+#[tauri::command]
+fn sync_history(state: State<AppState>, limit: Option<usize>) -> CmdResult<Vec<SyncLogRow>> {
+    with_lib(&state, |lib| {
+        let db = SyncDb::open(&lib.root)?;
+        Ok(db.log_list(limit.unwrap_or(200).min(1000)))
+    })
+}
+
+/// 逐文档同步状态（FR-SYN-03：文档树图标数据源）
+#[tauri::command]
+fn sync_doc_states(state: State<AppState>) -> CmdResult<Vec<sync::DocSyncState>> {
+    with_lib(&state, |lib| {
+        let db = SyncDb::open(&lib.root)?;
+        Ok(sync::doc_sync_states(lib, &db))
+    })
+}
+
 /// 关窗兜底：destroy 后若进程因未决 IPC 残留，前端定时器调用此命令强制退出
 #[tauri::command]
 fn force_exit(app: tauri::AppHandle) {
@@ -214,6 +473,7 @@ pub fn run() {
         .manage(AppState {
             lib: Mutex::new(None),
         })
+        .manage(std::sync::Arc::new(SyncRuntime::default()))
         .manage(pdf::PdfState::default())
         .setup(|app| {
             use tauri::Manager;
@@ -262,6 +522,14 @@ pub fn run() {
             export_write,
             import_read,
             import_doc,
+            sync_config_get,
+            sync_config_set,
+            sync_test,
+            sync_now,
+            sync_status,
+            sync_conflict_resolve,
+            sync_history,
+            sync_doc_states,
             pdf::pdf_export,
             pdf::pdf_chamber_pull,
             force_exit
