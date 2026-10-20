@@ -329,6 +329,7 @@ export async function init(onStep?: (msg: string) => void) {
   }
   s.ready = true;
   void initSync(); // 同步接线失败不影响主功能（3.3-1 离线优先）
+  void import("./aiflow").then((m) => m.initAi()); // AI 接线（离线优先同理）
 }
 
 /** 字数统计（FR-EDT-07 计数规则：CJK 逐字计，西文数字串计 1） */

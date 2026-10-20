@@ -1,15 +1,19 @@
+mod ai;
 mod dav;
+mod db;
 mod frontmatter;
 mod library;
 mod pdf;
 mod secrets;
 mod sync;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
+use ai::{ChatMsg, ChatStartAck};
 use dav::{DavBackend, StorageBackend, TestResult};
+use db::AiProvider;
 use library::{
     AppError, CmdResult, DocPayload, Library, SnapshotInfo, StartupInfo, TreeNode, WriteResult,
 };
@@ -402,6 +406,178 @@ fn force_exit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+// -- AI（FR-AI，M4） ------------------------------------------------------------
+
+fn lib_root_of(state: &State<AppState>) -> Result<std::path::PathBuf, AppError> {
+    let guard = state.lib.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .map(|l| l.root.clone())
+        .ok_or_else(|| AppError::new("no_library", "尚未打开文库"))
+}
+
+#[tauri::command]
+fn ai_provider_list(state: State<AppState>) -> CmdResult<Vec<AiProvider>> {
+    let root = lib_root_of(&state)?;
+    Ok(db::MetaDb::open(&root)?.provider_list())
+}
+
+/// 新增/更新 Provider；api_key 经 DPAPI 存 Secrets（FR-AI-01/NFR-08）
+#[tauri::command]
+fn ai_provider_save(
+    state: State<AppState>,
+    mut provider: AiProvider,
+    api_key: Option<String>,
+) -> CmdResult<AiProvider> {
+    let root = lib_root_of(&state)?;
+    if provider.id.is_empty() {
+        provider.id = uuid::Uuid::new_v4().to_string();
+    }
+    if let Some(key) = &api_key {
+        if !key.is_empty() {
+            secrets::set(&ai::secrets_key(&provider.id), key)?;
+        }
+    }
+    let db = db::MetaDb::open(&root)?;
+    db.provider_upsert(&provider)?;
+    Ok(db.provider_get(&provider.id).unwrap_or(provider))
+}
+
+#[tauri::command]
+fn ai_provider_delete(state: State<AppState>, id: String) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    let db = db::MetaDb::open(&root)?;
+    db.provider_delete(&id);
+    let _ = secrets::delete(&ai::secrets_key(&id));
+    Ok(())
+}
+
+#[tauri::command]
+fn ai_provider_set_default(state: State<AppState>, id: Option<String>) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    let db = db::MetaDb::open(&root)?;
+    db.kv_set("default_provider", id.as_deref().unwrap_or(""));
+    Ok(())
+}
+
+/// 连通性测试（GET /v1/models，不消耗对话 token）
+#[tauri::command]
+async fn ai_connectivity_test(
+    ai: State<'_, Arc<ai::AiState>>,
+    base_url: String,
+    api_key: String,
+) -> Result<TestResult, AppError> {
+    match ai::fetch_models(&ai.client, &base_url, &api_key).await {
+        Ok(_) => Ok(TestResult { ok: true, message: "连接成功".into() }),
+        Err(e) => Ok(TestResult { ok: false, message: e.message }),
+    }
+}
+
+#[tauri::command]
+async fn ai_models_fetch(
+    state: State<'_, AppState>,
+    ai: State<'_, Arc<ai::AiState>>,
+    provider_id: String,
+) -> Result<Vec<String>, AppError> {
+    let root = lib_root_of(&state)?;
+    let db = db::MetaDb::open(&root)?;
+    let p = db
+        .provider_get(&provider_id)
+        .ok_or_else(|| AppError::new("not_found", "Provider 不存在"))?;
+    let key = secrets::get(&ai::secrets_key(&p.id))?.unwrap_or_default();
+    ai::fetch_models(&ai.client, &p.base_url, &key).await
+}
+
+/// 发起 AI 作业（润色/续写/讨论共用）；结果经 ai:chunk/ai:done/ai:error/ai:cancelled 事件推送。
+/// 发送事实先行落日志（时间/Provider/字数，不含内容——FR-AI-06）。
+#[tauri::command]
+async fn ai_chat_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    aist: State<'_, Arc<ai::AiState>>,
+    kind: String,
+    provider_id: String,
+    messages: Vec<ChatMsg>,
+) -> Result<ChatStartAck, AppError> {
+    let root = lib_root_of(&state)?;
+    let db = db::MetaDb::open(&root)?;
+    let provider = db
+        .provider_get(&provider_id)
+        .ok_or_else(|| AppError::new("not_found", "Provider 不存在"))?;
+    if !provider.enabled {
+        return Err(AppError::new("ai_disabled", "该 Provider 已停用"));
+    }
+    let api_key = secrets::get(&ai::secrets_key(&provider.id))?.unwrap_or_default();
+    let chars = ai::total_chars(&messages);
+    db.log_request(&provider.name, chars, &kind);
+
+    let job = ai::ChatJob {
+        id: ai::new_job_id(),
+        kind,
+        provider,
+        api_key,
+        messages,
+        lib_root: root,
+    };
+    let ack = ChatStartAck { job_id: job.id.clone(), chars };
+    let aist = aist.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        ai::run_chat_job(aist, app, job).await;
+    });
+    Ok(ack)
+}
+
+/// 取消：置位标志 → 流被 drop 断连（真实中断，FR-AI-08）
+#[tauri::command]
+fn ai_job_cancel(aist: State<'_, Arc<ai::AiState>>, job_id: String) -> CmdResult<bool> {
+    Ok(ai::cancel_job(&aist, &job_id))
+}
+
+// -- AI 对话持久化（FR-AI-04：仅存本地 meta.db，不同步） ---------------------------
+
+#[tauri::command]
+fn ai_conversation_ensure(state: State<AppState>, doc_uuid: String, title: String) -> CmdResult<db::AiConversation> {
+    let root = lib_root_of(&state)?;
+    Ok(db::MetaDb::open(&root)?.conversation_ensure(&doc_uuid, &title)?)
+}
+
+#[tauri::command]
+fn ai_message_list(state: State<AppState>, conv_id: String) -> CmdResult<Vec<db::AiMessage>> {
+    let root = lib_root_of(&state)?;
+    Ok(db::MetaDb::open(&root)?.message_list(&conv_id))
+}
+
+#[tauri::command]
+fn ai_message_append(state: State<AppState>, conv_id: String, role: String, content: String) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    db::MetaDb::open(&root)?.message_append(&conv_id, &role, &content)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn ai_request_log(state: State<AppState>, limit: Option<usize>) -> CmdResult<Vec<db::AiRequestLog>> {
+    let root = lib_root_of(&state)?;
+    Ok(db::MetaDb::open(&root)?.request_log(limit.unwrap_or(100).min(1000)))
+}
+
+#[tauri::command]
+fn ai_request_log_clear(state: State<AppState>) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    db::MetaDb::open(&root)?.request_log_clear();
+    Ok(())
+}
+
+/// 隐私标记（FR-AI-06）：写 frontmatter，随同步多端生效
+#[tauri::command]
+fn doc_set_privacy(app: AppHandle, state: State<AppState>, path: String, privacy: bool) -> CmdResult<WriteResult> {
+    let r = with_lib(&state, |lib| lib.set_privacy(&path, privacy))?;
+    let _ = app.emit(
+        "doc:privacy_changed",
+        serde_json::json!({ "path": path, "privacy": privacy }),
+    );
+    Ok(r)
+}
+
 // -- 导入导出（FR-EXP/FR-IMP，M2；前端不持泛型 fs，走类型化命令） -------------
 
 /// 导出：写入任意路径（用户经系统保存对话框选择）
@@ -474,6 +650,7 @@ pub fn run() {
             lib: Mutex::new(None),
         })
         .manage(std::sync::Arc::new(SyncRuntime::default()))
+        .manage(std::sync::Arc::new(ai::AiState::new()))
         .manage(pdf::PdfState::default())
         .setup(|app| {
             use tauri::Manager;
@@ -530,6 +707,20 @@ pub fn run() {
             sync_conflict_resolve,
             sync_history,
             sync_doc_states,
+            ai_provider_list,
+            ai_provider_save,
+            ai_provider_delete,
+            ai_provider_set_default,
+            ai_connectivity_test,
+            ai_models_fetch,
+            ai_chat_start,
+            ai_job_cancel,
+            ai_conversation_ensure,
+            ai_message_list,
+            ai_message_append,
+            ai_request_log,
+            ai_request_log_clear,
+            doc_set_privacy,
             pdf::pdf_export,
             pdf::pdf_chamber_pull,
             force_exit

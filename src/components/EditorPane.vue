@@ -20,7 +20,23 @@ import {
   previewSnapshot,
   restoreSnapshot,
 } from "../store";
-import { mdToDoc, type PMNode } from "../codec";
+import { mdToDoc, docToMd, type PMNode } from "../codec";
+import { AiDraft } from "../aidraft-mark";
+import {
+  ai,
+  setAiEditor,
+  bindAiDocJson,
+  acceptContinue,
+  dismissContinue,
+  maybeCollapseDraft,
+  restoreCollapsedDraft,
+  cancelRunning,
+  openPolishUI,
+  startContinue,
+  openChat,
+} from "../aiflow";
+import { api } from "../api";
+import PolishPanel from "./PolishPanel.vue";
 import ExportPanel from "./ExportPanel.vue";
 
 type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
@@ -40,9 +56,32 @@ const editor = new Editor({
     TableRow,
     TableHeader,
     TableCell,
+    AiDraft,
   ],
   editorProps: {
     handleKeyDown(_view, event) {
+      // AI 续写草稿态（FR-AI-03）：Tab 接受 / Esc 放弃（优先于缩进）
+      if (ai.cont.state === "draft") {
+        if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+          event.preventDefault();
+          acceptContinue();
+          return true;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          dismissContinue();
+          return true;
+        }
+      } else if (ai.cont.collapsed && event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        restoreCollapsedDraft();
+        return true;
+      }
+      // 润色处理中：选区内任意按键 → 取消请求并立即解锁（不吞输入，FR-AI-02）
+      if (ai.polish.state === "running" && event.key.length === 1) {
+        cancelRunning("polish");
+        return false;
+      }
       // Tab = 插入 2 字符缩进（中文正文用全角空格，代码块用半角）；Shift+Tab 移除行首缩进
       // 列表内保留 TipTap 默认的层级进出行为（2026-10-19 用户定案：取消自动缩进）
       if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
@@ -64,14 +103,139 @@ const editor = new Editor({
           .run();
         return true;
       }
+      // AI 入口：Ctrl+Shift+P 润色 / Ctrl+Shift+Enter 续写
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        openPolishUI();
+        return true;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === "Enter") {
+        event.preventDefault();
+        void startContinue();
+        return true;
+      }
       return false;
     },
   },
   onUpdate: () => {
+    if (aiSuppressSave) return; // 草稿操作期间抑制自动保存
+    // 用户在草稿插入点之前输入 → 草稿收起为"待插入"（FR-AI-03）
+    maybeCollapseDraft(editor.state.selection.head);
     scheduleSave();
     scheduleCount();
   },
 });
+
+// AI 编辑器桥实现（aiflow 不依赖 TipTap；本文件是唯一耦合点）
+let aiSuppressSave = false;
+
+function deepMark(nodes: PMNode["content"]): PMNode["content"] {
+  const mark = { type: "aiDraft" } as never;
+  const walk = (n: PMNode): PMNode => ({
+    ...n,
+    marks: n.text ? [...(n.marks ?? []), mark as never] : n.marks,
+    content: n.content ? n.content.map(walk) : undefined,
+  });
+  return nodes?.map(walk);
+}
+
+function nodesOf(md: string): PMNode["content"] {
+  const doc = mdToDoc(md) as PMNode;
+  return (doc.content ?? []) as PMNode["content"];
+}
+
+setAiEditor({
+  getSelection: () => {
+    const { from, to, empty } = editor.state.selection;
+    if (empty) return null;
+    const slice = editor.state.doc.slice(from, to);
+    const md = docToMd({ type: "doc", content: slice.content.toJSON() as never } as PMNode);
+    return { from, to, text: md };
+  },
+  replaceRangeWithMd: (from, to, md) => {
+    editor
+      .chain()
+      .focus()
+      .insertContentAt({ from, to }, nodesOf(md) as never, { updateSelection: true })
+      .run();
+  },
+  insertDraft: (md) => {
+    try {
+      const anchor = editor.state.selection.to;
+      aiSuppressSave = true;
+      editor
+        .chain()
+        .insertContentAt(anchor, deepMark(nodesOf(md)) as never)
+        .run();
+      return { from: anchor, to: editor.state.selection.to };
+    } finally {
+      aiSuppressSave = false;
+    }
+  },
+  updateDraft: (from, to, md) => {
+    try {
+      aiSuppressSave = true;
+      editor
+        .chain()
+        .insertContentAt({ from, to }, deepMark(nodesOf(md)) as never)
+        .run();
+      return { from, to: editor.state.selection.to };
+    } finally {
+      aiSuppressSave = false;
+    }
+  },
+  acceptDraft: (from, to) => {
+    try {
+      aiSuppressSave = true;
+      editor
+        .chain()
+        .command(({ tr }) => {
+          tr.removeMark(from, to, "aiDraft" as never);
+          return true;
+        })
+        .run();
+    } finally {
+      aiSuppressSave = false;
+    }
+  },
+  removeDraft: (from, to) => {
+    try {
+      aiSuppressSave = true;
+      editor.chain().deleteRange({ from, to }).run();
+    } finally {
+      aiSuppressSave = false;
+    }
+  },
+  getCursor: () => editor.state.selection.to,
+  contextAround: (n) => {
+    const pos = editor.state.selection.to;
+    const size = editor.state.doc.content.size;
+    const before = editor.state.doc.textBetween(Math.max(0, pos - n), pos, "\n");
+    const after = editor.state.doc.textBetween(pos, Math.min(size, pos + n), "\n");
+    const all = editor.state.doc.textBetween(0, pos, "\n");
+    const h = all.lastIndexOf("\n# ");
+    const chapterStart = h >= 0 ? all.slice(h + 1, Math.min(all.length, h + 1 + n)) : all.slice(0, Math.min(all.length, n));
+    return { before, after, chapterStart };
+  },
+  chapterText: () => {
+    const pos = editor.state.selection.to;
+    const before = editor.state.doc.textBetween(0, pos, "\n");
+    const h = before.lastIndexOf("\n# ");
+    const size = editor.state.doc.content.size;
+    return editor.state.doc.textBetween(h >= 0 ? 0 : 0, Math.min(size, 6000), "\n").slice(h >= 0 ? h : 0);
+  },
+  insertAtCursor: (md) => {
+    editor
+      .chain()
+      .focus()
+      .insertContentAt(editor.state.selection.to, nodesOf(md) as never)
+      .run();
+  },
+  suppressSave: (on) => {
+    aiSuppressSave = on;
+  },
+});
+bindAiDocJson(() => editor.getJSON() as unknown as PMNode);
 
 onMounted(() => {
   bindEditor(() => editor.getJSON() as unknown as PMNode);
@@ -169,6 +333,7 @@ const t = reactive({
   quote: false,
   codeblock: false,
   inTable: false,
+  hasSel: false,
 });
 
 function syncToolbarState() {
@@ -185,6 +350,7 @@ function syncToolbarState() {
   t.quote = editor.isActive("blockquote");
   t.codeblock = editor.isActive("codeBlock");
   t.inTable = editor.isActive("table");
+  t.hasSel = !editor.state.selection.empty;
 }
 
 const c = () => editor.chain().focus();
@@ -233,6 +399,15 @@ const saveHint = computed(() => {
 
 function fmtTime(unix: number) {
   return new Date(unix * 1000).toTimeString().slice(0, 5);
+}
+
+async function togglePrivacy() {
+  const cur = s.current;
+  if (!cur) return;
+  const next = !cur.privacy;
+  const r = await api.docSetPrivacy(cur.path, next);
+  s.current = { ...cur, privacy: next };
+  s.lastReadHash = r.hash;
 }
 
 function toggleLink() {
@@ -306,6 +481,18 @@ watch(
         <button class="btn small ghost" title="导出（Ctrl+E）" @click="s.exportOpen = !s.exportOpen">
           导出
         </button>
+        <template v-if="ai.enabled">
+          <button
+            class="btn small ghost"
+            :class="{ warn: s.current?.privacy }"
+            :title="s.current?.privacy ? '隐私文档：AI 已拦截（点击关闭标记）' : '标记为隐私（AI 永不发送其内容）'"
+            @click="togglePrivacy"
+          >
+            {{ s.current?.privacy ? "🔒" : "🔓" }}
+          </button>
+          <button class="btn small ghost" title="AI 讨论（Ctrl+Shift+A）" @click="void openChat()">讨论</button>
+          <button class="btn small ghost" title="AI Provider 设置" @click="ai.settingsOpen = !ai.settingsOpen">AI</button>
+        </template>
       </div>
 
       <!-- 格式工具栏 -->
@@ -343,6 +530,19 @@ watch(
           ⊞ 表格
         </button>
         <span style="flex: 1" />
+        <template v-if="ai.enabled">
+          <button
+            class="tool"
+            :class="{ on: t.hasSel }"
+            title="AI 润色（选中文字后 Ctrl+Shift+P）"
+            @click="openPolishUI()"
+          >
+            ✨ 润色
+          </button>
+          <button class="tool" title="AI 续写（Ctrl+Shift+Enter，草稿中 Tab 接受 / Esc 放弃）" @click="void startContinue()">
+            ⤵ 续写
+          </button>
+        </template>
         <button class="tool" :class="{ on: gridOn }" title="稿纸模式（横线本 + 缩进参考线）" @click="toggleGrid">
           稿纸
         </button>
@@ -364,6 +564,24 @@ watch(
 
       <!-- 导出面板（FR-EXP，M2） -->
       <ExportPanel v-if="s.exportOpen" />
+
+      <!-- AI 润色面板（FR-AI-02，M4） -->
+      <PolishPanel v-if="ai.polishOpen || ai.polish.state !== 'idle'" />
+
+      <!-- AI 续写草稿提示条（FR-AI-03：草稿态视觉区分 + 收起态取回） -->
+      <div v-if="ai.cont.state !== 'idle' || ai.cont.collapsed" class="cont-bar">
+        <template v-if="ai.cont.state === 'running'">⤵ 续写生成中…（Esc 取消）</template>
+        <template v-else-if="ai.cont.state === 'draft'">
+          ⤵ 灰色斜体为 AI 草稿：<b>Tab 接受</b> · Esc 放弃 · 插入点前输入将收起草稿
+        </template>
+        <template v-else-if="ai.cont.collapsed">⤵ 有一段待插入草稿：<b>Tab 取回</b></template>
+        <span v-if="ai.cont.error" class="cont-err">{{ ai.cont.error }}</span>
+      </div>
+
+      <!-- 隐私文档常驻标识（FR-AI-06） -->
+      <div v-if="s.current?.privacy" class="privacy-banner">
+        🔒 隐私文档——内容永不被发送给 AI（润色/续写/文档级上下文自动拦截）
+      </div>
 
       <!-- 版本历史面板（FR-SAV-03） -->
       <div v-if="s.history.open" class="history-panel">

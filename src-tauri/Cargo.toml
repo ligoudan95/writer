@@ -24,7 +24,9 @@ dirs = "6"
 blake3 = "1"
 encoding_rs = "0.8"
 # M3 同步：WebDAV 客户端（唯一网络出口 NetGateway 的执行层）
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip"] }
+# M4 AI：stream 供 SSE 增量消费（chat_stream）
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "stream", "json"] }
+futures-util = "0.3"
 # M3 同步：sync_state.db / 墓碑去重 / 同步历史
 rusqlite = { version = "0.37", features = ["bundled"] }
 # M3 同步：凭据 DPAPI 加密（NFR-08：前端永不接触明文）
@@ -34,6 +36,9 @@ webview2-com = "0.39"
 windows-core = "0.62"
 
 # See the optimization guideline for more details: https://tauri.app/concept/size/
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

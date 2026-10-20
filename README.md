@@ -25,7 +25,8 @@ node tests/codec-roundtrip.mjs   # md ↔ DocModel 往返无损
 node tests/exporters.mjs         # TXT/MD/DOCX/HTML 导出器（HTML 供 PDF 管线）
 node tests/pdf-spike/spike.mjs   # Paged.js 分页预研（结论见 docs/PagedJS-预研报告.md）
 cargo run -- --pdf-selftest out.pdf   # PDF 管线端到端自检（渲染舱分页 + WebView2 COM 打印）
-cargo test                          # Rust 单测 + 同步引擎双机模拟（A3/A4/A11–A14）
+cargo test                          # Rust 单测 + 同步双机模拟（A3/A4/A11–A15）+ AI 流式/取消/隐私
+node tests/ai-diff.mjs              # 润色 diff 分块（需先 build:tests；M4/R9）
 ```
 
 前置条件：Node 20+、Rust stable（MSVC）、Visual Studio C++ 工具集 + Windows 11 SDK、WebView2 运行时。
@@ -48,7 +49,9 @@ src-tauri/          Rust 核心
   src/dav.rs        WebDAV 存储后端（5.1 StorageBackend）+ Mock（双机模拟回归）
   src/secrets.rs    Secrets 服务：DPAPI 凭据加密（NFR-08）
   src/sync.rs       同步引擎：状态机批次 / 墓碑清单 / sync_state.db / 冲突三动作
-tests/              回归测试与预研驱动（稿纸几何断言 / codec / 导出器 / PDF spike）
+  src/db.rs         meta.db：AI Provider / 对话 / 请求日志（仅本地）
+  src/ai.rs         AI NetGateway：SSE 流式 / 真实取消 / 50ms 批量 ai:chunk / 错误归因
+tests/              回归测试与预研驱动（稿纸 / codec / 导出器 / PDF spike / diff / AI 模拟服务）
 ```
 
 ## 核心原则（文档 3.3）

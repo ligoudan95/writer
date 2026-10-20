@@ -56,7 +56,7 @@ function onEnter(node: TreeNode, e: KeyboardEvent) {
         @click="select(node)"
         @dblclick="startRename(node)"
       >
-        <span class="treeitem-icon">{{ node.kind === "folder" ? "▸" : "📄" }}</span>
+        <span class="treeitem-icon">{{ node.kind === "folder" ? "▸" : node.privacy ? "🔒" : "📄" }}</span>
         <input
           v-if="editing?.id === node.id"
           v-model="editing.value"

@@ -55,6 +55,9 @@ pub struct TreeNode {
     pub name: String,
     /// "folder" | "doc"
     pub kind: String,
+    /// 隐私标记（FR-AI-06 可视化：树形锁标）
+    #[serde(default)]
+    pub privacy: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<TreeNode>,
 }
@@ -65,6 +68,12 @@ pub struct DocPayload {
     pub title: String,
     pub body: String,
     pub hash: String,
+    /// 隐私标记（FR-AI-06：frontmatter privacy，随同步多端生效）
+    #[serde(default)]
+    pub privacy: bool,
+    /// 文档 uuid（frontmatter id；AI 会话绑定等场景用）
+    #[serde(default)]
+    pub uuid: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -451,11 +460,38 @@ impl Library {
             .unwrap_or_else(|| {
                 display_name_from_filename(&path.file_name().unwrap_or_default().to_string_lossy())
             });
+        let privacy = fm.as_ref().is_some_and(is_privacy);
+        let uuid = fm.as_ref().and_then(|f| f.get("id")).unwrap_or("").to_string();
         Ok(DocPayload {
             path: rel.to_string(),
             title,
             body,
             hash,
+            privacy,
+            uuid,
+        })
+    }
+
+    /// 隐私标记开关（FR-AI-06）：写 frontmatter，随同步多端生效；返回新 hash 供前端采纳
+    pub fn set_privacy(&self, rel: &str, on: bool) -> CmdResult<WriteResult> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let path = self.resolve(rel)?;
+        let bytes = fs::read(&path)?;
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        let (fm_opt, body) = frontmatter::split(&content);
+        let mut fm = fm_opt.unwrap_or_default();
+        if on {
+            fm.set("privacy", "true");
+        } else {
+            fm.entries.retain(|(k, _)| k != "privacy");
+        }
+        let full = format!("{}
+{}", fm.render(), body);
+        atomic_write(&path, full.as_bytes())?;
+        Ok(WriteResult {
+            path: rel.to_string(),
+            hash: hash_str(full.as_bytes()),
+            saved_at: now_secs(),
         })
     }
 
@@ -570,11 +606,14 @@ impl Library {
                 .and_then(|f| f.get("title"))
                 .unwrap_or(&entry.rel)
                 .to_string();
+            let uuid2 = fm.as_ref().and_then(|f| f.get("id")).unwrap_or("").to_string();
             out.push(DocPayload {
                 path: entry.rel.clone(),
                 title,
                 body,
                 hash: hash_str(entry.content.as_bytes()),
+                privacy: fm.as_ref().is_some_and(is_privacy),
+                uuid: uuid2,
             });
         }
         out
@@ -608,6 +647,7 @@ impl Library {
             id: self.rel_of(&path),
             name: base,
             kind: "doc".into(),
+            privacy: false,
             children: vec![],
         })
     }
@@ -636,6 +676,7 @@ impl Library {
             id: self.rel_of(&path),
             name: base,
             kind: "doc".into(),
+            privacy: false,
             children: vec![],
         })
     }
@@ -712,6 +753,7 @@ impl Library {
             id: self.rel_of(&path),
             name: base,
             kind: "folder".into(),
+            privacy: false,
             children: vec![],
         })
     }
@@ -922,7 +964,7 @@ fn unique_dir_name(dir: &Path, base: &str) -> String {
 /// 文档显示名 = frontmatter title（缺失则文件名剥序号前缀）
 fn walk_dir(dir: &Path, prefix: &str) -> Vec<TreeNode> {
     let mut folders: Vec<TreeNode> = Vec::new();
-    let mut docs: Vec<(String, String)> = Vec::new(); // (文件名, 显示名)
+    let mut docs: Vec<(String, String, bool)> = Vec::new(); // (文件名, 显示名, 隐私)
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return folders,
@@ -944,17 +986,24 @@ fn walk_dir(dir: &Path, prefix: &str) -> Vec<TreeNode> {
                 id: rel,
                 name,
                 kind: "folder".into(),
+                privacy: false,
                 children,
             });
         } else if name.to_lowercase().ends_with(".md") {
-            let display = read_title(&path).unwrap_or_else(|| display_name_from_filename(&name));
-            docs.push((name, display));
+            let fm = read_fm(&path);
+            let display = fm
+                .as_ref()
+                .and_then(|f| f.get("title"))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| display_name_from_filename(&name));
+            let privacy = fm.as_ref().is_some_and(|f| is_privacy(f));
+            docs.push((name, display, privacy));
         }
     }
     folders.sort_by(|a, b| natural_cmp(&a.name, &b.name));
     docs.sort_by(|a, b| natural_cmp(&a.0, &b.0));
     let mut out = folders;
-    out.extend(docs.into_iter().map(|(name, display)| TreeNode {
+    out.extend(docs.into_iter().map(|(name, display, privacy)| TreeNode {
         id: if prefix.is_empty() {
             name
         } else {
@@ -962,16 +1011,25 @@ fn walk_dir(dir: &Path, prefix: &str) -> Vec<TreeNode> {
         },
         name: display,
         kind: "doc".into(),
+        privacy,
         children: vec![],
     }));
     out
 }
 
-fn read_title(path: &Path) -> Option<String> {
+fn read_fm(path: &Path) -> Option<Frontmatter> {
     let bytes = fs::read(path).ok()?;
     let content = String::from_utf8_lossy(&bytes);
     let (fm, _) = frontmatter::split(&content);
-    fm.and_then(|f| f.get("title").map(|s| s.to_string()))
+    fm
+}
+
+/// privacy 键判定（宽松接受 true/1/yes）
+pub fn is_privacy(fm: &Frontmatter) -> bool {
+    matches!(
+        fm.get("privacy").map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("true") | Some("1") | Some("yes")
+    )
 }
 
 // ---------------------------------------------------------------------------

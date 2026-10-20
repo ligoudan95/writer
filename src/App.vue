@@ -9,6 +9,9 @@ import StatusBar from "./components/StatusBar.vue";
 import SyncSettings from "./components/SyncSettings.vue";
 import ConflictView from "./components/ConflictView.vue";
 import DirectionAsk from "./components/DirectionAsk.vue";
+import AiSettings from "./components/AiSettings.vue";
+import ChatPanel from "./components/ChatPanel.vue";
+import { ai } from "./aiflow";
 import {
   s,
   init,
@@ -107,6 +110,10 @@ async function onKey(e: KeyboardEvent) {
   } else if (k === "e") {
     e.preventDefault();
     s.exportOpen = !s.exportOpen;
+  } else if (k === "a" && e.shiftKey) {
+    // Ctrl+Shift+A 打开 AI 面板（附录 A）
+    e.preventDefault();
+    void import("./aiflow").then((m) => m.openChat());
   }
 }
 </script>
@@ -143,6 +150,12 @@ async function onKey(e: KeyboardEvent) {
     <main class="main">
       <EditorPane />
     </main>
+
+    <!-- AI 讨论侧栏（FR-AI-04） -->
+    <ChatPanel v-if="ai.chatOpen && ai.enabled" />
+
+    <!-- AI 设置面板（FR-AI-01） -->
+    <AiSettings v-if="ai.settingsOpen" />
 
     <!-- 同步设置面板（FR-SYN-01） -->
     <SyncSettings v-if="s.sync.settingsOpen" />

@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test:grid": "node tests/grid-verify.mjs",
-    "build:tests": "rolldown src/codec.ts --format esm --file .tmp-codec.mjs && rolldown src/exporter.ts --format esm --file .tmp-exporter.mjs"
+    "build:tests": "rolldown src/codec.ts --format esm --file .tmp-codec.mjs && rolldown src/exporter.ts --format esm --file .tmp-exporter.mjs && rolldown src/diff.ts --format esm --file .tmp-diff.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

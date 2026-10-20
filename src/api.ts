@@ -4,6 +4,7 @@ export interface TreeNode {
   id: string;
   name: string;
   kind: "folder" | "doc";
+  privacy?: boolean;
   children?: TreeNode[];
 }
 
@@ -12,6 +13,8 @@ export interface DocPayload {
   title: string;
   body: string;
   hash: string;
+  privacy?: boolean;
+  uuid?: string;
 }
 
 export interface WriteResult {
@@ -87,6 +90,42 @@ export interface SyncLogRow {
   result: string;
 }
 
+// -- AI（FR-AI，M4） ------------------------------------------------------------
+
+export interface AiProvider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  model: string;
+  enabled: boolean;
+  stream: boolean;
+  isDefault: boolean;
+}
+export interface ChatMsg {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+export interface AiConversation {
+  id: string;
+  docUuid: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface AiMessage {
+  id: number;
+  convId: string;
+  role: string;
+  content: string;
+  createdAt: number;
+}
+export interface AiRequestLog {
+  time: number;
+  provider: string;
+  chars: number;
+  kind: string;
+}
+
 const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
   invoke<T>(cmd, args);
 
@@ -141,4 +180,26 @@ export const api = {
     call<null>("sync_conflict_resolve", { copyPath, keepRemote }),
   syncHistory: (limit?: number) => call<SyncLogRow[]>("sync_history", { limit }),
   syncDocStates: () => call<{ path: string; state: string }[]>("sync_doc_states"),
+  // AI（5.3 契约 ai.* 域）
+  aiProviderList: () => call<AiProvider[]>("ai_provider_list"),
+  aiProviderSave: (provider: AiProvider, apiKey?: string) =>
+    call<AiProvider>("ai_provider_save", { provider, apiKey }),
+  aiProviderDelete: (id: string) => call<null>("ai_provider_delete", { id }),
+  aiProviderSetDefault: (id: string | null) =>
+    call<null>("ai_provider_set_default", { id }),
+  aiConnectivityTest: (baseUrl: string, apiKey: string) =>
+    call<DavTestResult>("ai_connectivity_test", { baseUrl, apiKey }),
+  aiModelsFetch: (providerId: string) => call<string[]>("ai_models_fetch", { providerId }),
+  aiChatStart: (kind: "polish" | "continue" | "chat", providerId: string, messages: ChatMsg[]) =>
+    call<{ jobId: string; chars: number }>("ai_chat_start", { kind, providerId, messages }),
+  aiJobCancel: (jobId: string) => call<boolean>("ai_job_cancel", { jobId }),
+  aiConversationEnsure: (docUuid: string, title: string) =>
+    call<AiConversation>("ai_conversation_ensure", { docUuid, title }),
+  aiMessageList: (convId: string) => call<AiMessage[]>("ai_message_list", { convId }),
+  aiMessageAppend: (convId: string, role: string, content: string) =>
+    call<null>("ai_message_append", { convId, role, content }),
+  aiRequestLog: (limit?: number) => call<AiRequestLog[]>("ai_request_log", { limit }),
+  aiRequestLogClear: () => call<null>("ai_request_log_clear"),
+  docSetPrivacy: (path: string, privacy: boolean) =>
+    call<WriteResult>("doc_set_privacy", { path, privacy }),
 };
