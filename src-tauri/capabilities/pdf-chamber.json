@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pdf-chamber",
+  "description": "PDF 渲染舱（离屏分页 webview）：仅事件与载荷拉取，不持任何用户面能力",
+  "windows": ["pdf-chamber"],
+  "permissions": ["core:default"]
+}

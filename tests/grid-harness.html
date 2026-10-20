@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="../src/style.css">
+<style>
+  body { margin: 0; }
+  /* 复刻应用内布局：编辑区宽度与真实窗口一致 */
+  .harness { width: 1296px; }
+  .editor-scroll { overflow: visible; }
+</style>
+</head>
+<body>
+<div class="harness editor-grid">
+  <div class="editor-content">
+    <div class="ProseMirror" contenteditable="false">
+      <h1>标题一跨两行</h1>
+      <p>甲基准段一：确立正文坐线基准数值样本。</p>
+      <p>甲基准段二：第二个基准样本数据行。</p>
+      <pre><code class="language-text">CODE-ONE 第一行代码
+CODE-TWO 第二行代码</code></pre>
+      <p>乙代码后段一：观察代码块相位差异数值。</p>
+      <p>乙代码后段二：第二个样本数据行文本。</p>
+      <table><tbody>
+        <tr><th><p>表甲</p></th><th><p>表乙</p></th></tr>
+        <tr><td><p>行一甲</p></td><td><p>行一乙</p></td></tr>
+        <tr><td><p>行二甲</p></td><td><p>行二乙</p></td></tr>
+      </tbody></table>
+      <p>丙表格后段一：观察表格相位差异数据。</p>
+      <ul>
+        <li><p>列表项甲：行位样本</p></li>
+        <li><p>列表项乙：第二个样本</p></li>
+      </ul>
+      <p>丁列表后段一：观察列表相位差异数据。</p>
+      <blockquote><p>引用行样本：写作是线性输出。</p></blockquote>
+      <p>戊引用后段一：末尾对照基准样本行。</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>

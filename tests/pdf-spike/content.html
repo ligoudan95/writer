@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Paged.js 预研样张</title>
+<script>
+window.PagedConfig = { after: (flow) => { window.__pagedDone = flow; window.__pagedMs = Math.round(performance.now()); } };
+</script>
+<script src="../../node_modules/pagedjs/dist/paged.polyfill.js"></script>
+<style>
+  /* 排版模板：模拟最终产品的 PDF 样式（FR-EXP-05） */
+  @page {
+    size: A4;
+    margin: 25mm 22mm;
+    @bottom-center { content: counter(page); font-size: 9pt; color: #999; }
+    @top-center { content: string(doc-title); font-size: 9pt; color: #aaa; }
+  }
+  @page :first { @top-center { content: none; } @bottom-center { content: none; } }
+  html { font-family: "LXGW WenKai", "霞鹜文楷", "Source Han Sans SC", "Microsoft YaHei", serif; }
+  body { margin: 0; font-size: 11pt; line-height: 1.9; color: #26241f; }
+  h1.doc-title { font-size: 22pt; text-align: center; margin: 30vh 0 0; string-set: doc-title content(text); }
+  .subtitle { text-align: center; color: #8a857a; }
+  h2 { font-size: 15pt; margin: 1.6em 0 0.5em; break-after: avoid; }
+  p { margin: 0.3em 0; text-align: justify; }
+  blockquote { margin: 0.8em 1em; color: #8a857a; border-left: 2px solid #b08552; padding-left: 0.8em; }
+  table { border-collapse: collapse; width: 100%; font-size: 10pt; }
+  th, td { border: 0.5pt solid #999; padding: 4pt 8pt; text-align: left; }
+  th { background: #f0efec; }
+  pre { background: #f5f4f1; padding: 8pt 12pt; font-size: 9pt; white-space: pre-wrap; }
+  .toc a { text-decoration: none; color: inherit; }
+  .toc a::after { content: ' ··· ' target-counter(attr(href), page); }
+</style>
+</head>
+<body>
+<div id="source">
+  <h1 class="doc-title">paged.js 分页预研样张</h1>
+  <p class="subtitle">2026-10-20 · Writer M2 预研</p>
+  <h2>目录</h2>
+  <ol class="toc">
+    <li><a href="#s1">第一章　章节跨页与页码</a></li>
+    <li><a href="#s2">第二章　表格与代码块分页</a></li>
+    <li><a href="#s3">第三章　长文压力段</a></li>
+  </ol>
+  <h2 id="s1">第一章　章节跨页与页码</h2>
+  <p>本章验证正文断页、页码计数与页眉 string-set。写作用的文字应当足够真实，长短句交错，包含标点与引号「这样」，以及英文 mixed-in 内容 WebView2 rendering。</p>
+  <blockquote>引用块：写作是线性输出，排版是空间艺术。引用跨页时应保持缩进与边界。</blockquote>
+  <h2 id="s2">第二章　表格与代码块分页</h2>
+  <table>
+    <tr><th>格式</th><th>引擎</th><th>页码</th></tr>
+    <tr><td>WebView2 PrintToPdf 原生</td><td>Chromium 打印</td><td>不支持自定义</td></tr>
+    <tr><td>Paged.js 分页后打印</td><td>DOM 分页 + Chromium 打印</td><td>margin box 支持</td></tr>
+  </table>
+  <pre>fn main() {
+    println!("稿纸模式与分页预研，同日完成。");
+}</pre>
+  <h2 id="s3">第三章　长文压力段</h2>
+  <div id="filler"></div>
+</div>
+<script>
+// 生成 ~40 页正文（每页约 33 行 × 30 字）
+(() => {
+  const f = document.getElementById("filler");
+  const words = ["稿纸", "分页", "页码", "页眉", "表格", "引用", "排版", "断行", "字体", "行距", "目录", "封面", "章节", "压测", "预研"];
+  let seed = 42;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const SECTIONS = Number(new URLSearchParams(location.search).get("s") || 60);
+  for (let i = 0; i < SECTIONS; i++) {
+    const h = document.createElement("h2");
+    h.textContent = `第三章之${i + 1}节　压测小节`;
+    f.appendChild(h);
+    for (let j = 0; j < 9; j++) {
+      const p = document.createElement("p");
+      let t = [];
+      for (let k = 0; k < 30 + Math.floor(rnd() * 20); k++) t.push(words[Math.floor(rnd() * words.length)]);
+      p.textContent = `第${j + 1}段：` + t.join("");
+      f.appendChild(p);
+    }
+  }
+})();</script>
+</body>
+</html>

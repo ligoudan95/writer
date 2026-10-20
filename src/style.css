@@ -1,0 +1,411 @@
+/* ===== 主题变量（FR-UI-01/03） ===== */
+:root {
+  --bg: #f7f7f5;
+  --bg-side: #f0efec;
+  --bg-editor: #ffffff;
+  --fg: #26241f;
+  --fg-dim: #8a857a;
+  --border: #e2dfd8;
+  --accent: #b08552;
+  --accent-fg: #ffffff;
+  --danger: #b3413a;
+  --grid-h: rgba(60, 50, 30, 0.08);
+  --paper: #fffdf7;
+  --grid-cover: var(--paper);
+  --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-edit: "LXGW WenKai", "霞鹜文楷", "Source Han Sans SC", "思源黑体", "Microsoft YaHei", serif;
+}
+
+html[data-theme="dark"] {
+  --bg: #1e1d1a;
+  --bg-side: #191816;
+  --bg-editor: #242320;
+  --fg: #d8d4cb;
+  --fg-dim: #7d786e;
+  --border: #35322c;
+  --accent: #c89a63;
+  --accent-fg: #1e1d1a;
+  --danger: #d07069;
+  --grid-h: rgba(255, 255, 255, 0.07);
+  --paper: transparent;
+  --grid-cover: var(--bg-editor);
+}
+
+/* ===== 基础 ===== */
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font-family: var(--font-ui);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+button { font-family: inherit; }
+
+.boot {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--fg-dim);
+  font-size: 14px;
+}
+.boot-err { color: var(--danger); margin: 0; }
+.boot-err.detail { font-size: 12px; max-width: 80%; word-break: break-all; text-align: center; }
+
+/* ===== 应用布局（FR-UI-02 三栏，M1 无 AI 面板） ===== */
+.app {
+  display: grid;
+  grid-template-columns: 264px 1fr;
+  grid-template-rows: auto 1fr 30px;
+  height: 100vh;
+}
+.recovery { grid-column: 1 / -1; }
+.sidebar { grid-row: 2; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-side); border-right: 1px solid var(--border); }
+.main { grid-row: 2; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-editor); }
+.statusbar-host, footer.statusbar { grid-row: 3; grid-column: 1 / -1; }
+
+/* ===== 崩溃恢复横幅 ===== */
+.recovery { background: var(--accent); color: var(--accent-fg); padding: 4px 12px; font-size: 13px; }
+.recovery-row { display: flex; gap: 10px; align-items: center; padding: 2px 0; }
+
+/* ===== 文档树 ===== */
+.doctree { display: flex; flex-direction: column; height: 100%; }
+.doctree-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px 6px; font-size: 12px; color: var(--fg-dim); letter-spacing: 1px;
+}
+.doctree-actions { display: flex; gap: 4px; }
+.doctree-body { flex: 1; overflow-y: auto; padding-bottom: 8px; }
+.doctree-empty { padding: 24px 14px; color: var(--fg-dim); font-size: 13px; display: flex; flex-direction: column; gap: 10px; }
+.doctree-foot { padding: 6px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.treeitem {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 8px; margin: 0 4px; border-radius: 6px;
+  font-size: 13.5px; cursor: pointer; min-height: 28px;
+}
+.treeitem:hover { background: color-mix(in srgb, var(--border) 45%, transparent); }
+.treeitem.active { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--fg); }
+.treeitem.folder_open { background: color-mix(in srgb, var(--border) 60%, transparent); }
+.treeitem-icon { width: 16px; text-align: center; font-size: 11px; color: var(--fg-dim); flex: none; }
+.treeitem-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.treeitem-ops { display: none; gap: 2px; flex: none; }
+.treeitem:hover .treeitem-ops { display: flex; }
+.treeitem-edit {
+  flex: 1; min-width: 0; font-size: 13px; padding: 1px 4px;
+  border: 1px solid var(--accent); border-radius: 4px; background: var(--bg-editor); color: var(--fg); outline: none;
+}
+
+/* ===== 编辑器区 ===== */
+.editorpane { display: flex; flex-direction: column; height: 100%; position: relative; }
+.editor-titlebar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 24px 6px;
+}
+.doc-title {
+  flex: 1; font-size: 21px; font-weight: 600; font-family: var(--font-edit);
+  border: none; background: transparent; color: var(--fg); outline: none; padding: 2px 6px;
+  border-radius: 6px; min-width: 0;
+}
+.doc-title:hover, .doc-title:focus { background: color-mix(in srgb, var(--border) 30%, transparent); }
+.save-hint { font-size: 12px; color: var(--fg-dim); flex: none; }
+.save-hint.warn { color: var(--danger); }
+
+.toolbar, .tablebar {
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  padding: 4px 20px; border-bottom: 1px solid var(--border);
+}
+.tablebar { background: color-mix(in srgb, var(--accent) 8%, var(--bg-editor)); }
+.tool {
+  border: none; background: transparent; color: var(--fg); cursor: pointer;
+  min-width: 26px; height: 26px; padding: 0 6px; border-radius: 5px; font-size: 13px;
+}
+.tool:hover { background: color-mix(in srgb, var(--border) 55%, transparent); }
+.tool.on { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.tool.it { font-style: italic; }
+.tool.u { text-decoration: underline; }
+.tool.danger { color: var(--danger); }
+.sep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; flex: none; }
+
+.conflict-banner {
+  display: flex; align-items: center; gap: 12px;
+  background: color-mix(in srgb, var(--danger) 12%, var(--bg-editor));
+  color: var(--danger); font-size: 13px; padding: 6px 24px;
+}
+
+.editor-scroll { flex: 1; overflow-y: auto; }
+.editor-content { padding-bottom: 30vh; }
+
+/* ProseMirror 正文排版（FR-UI-03；2026-10-19 用户定案：取消自动缩进，改 Tab 手动缩进） */
+.ProseMirror {
+  font-family: var(--font-edit);
+  font-size: 17px;
+  line-height: 1.95;
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 32px 32px 0;
+  outline: none;
+  user-select: text;
+}
+.ProseMirror p { margin: 0.2em 0; }
+.ProseMirror h1, .ProseMirror h2, .ProseMirror h3,
+.ProseMirror h4, .ProseMirror h5, .ProseMirror h6 {
+  font-weight: 700; margin: 1.1em 0 0.4em; text-indent: 0; line-height: 1.4;
+}
+.ProseMirror h1 { font-size: 1.55em; }
+.ProseMirror h2 { font-size: 1.32em; }
+.ProseMirror h3 { font-size: 1.16em; }
+.ProseMirror blockquote {
+  margin: 0.8em 0; padding: 0.1em 1em; text-indent: 0;
+  border-left: 3px solid var(--accent); color: var(--fg-dim);
+}
+.ProseMirror blockquote p { text-indent: 0; }
+.ProseMirror ul, .ProseMirror ol { padding-left: 1.6em; margin: 0.3em 0; }
+.ProseMirror li p { text-indent: 0; margin: 0.1em 0; }
+.ProseMirror ul[data-type="taskList"] { list-style: none; padding-left: 0.4em; }
+.ProseMirror ul[data-type="taskList"] li { display: flex; gap: 8px; align-items: center; }
+.ProseMirror ul[data-type="taskList"] li > p { margin: 0; flex: 1; min-width: 0; }
+.ProseMirror pre {
+  font-family: "Cascadia Code", Consolas, monospace; font-size: 14px; line-height: 1.6;
+  background: color-mix(in srgb, var(--border) 40%, var(--bg-editor));
+  border-radius: 8px; padding: 12px 16px; overflow-x: auto; text-indent: 0;
+}
+.ProseMirror code { font-family: Consolas, monospace; font-size: 0.92em; }
+.ProseMirror hr { border: none; border-top: 1px solid var(--border); margin: 1.4em 0; }
+.ProseMirror a { color: var(--accent); }
+.ProseMirror table {
+  border-collapse: collapse; table-layout: fixed; width: 100%; margin: 0.8em 0; text-indent: 0;
+}
+.ProseMirror th, .ProseMirror td {
+  border: 1px solid var(--border); padding: 6px 10px; vertical-align: top; text-align: left;
+}
+.ProseMirror th { background: color-mix(in srgb, var(--border) 35%, transparent); font-weight: 600; }
+.ProseMirror p:first-child:has(+ *), .ProseMirror > h1 + p {  }
+.ProseMirror img { max-width: 100%; }
+.ProseMirror .selectedCell::after { content: ""; }
+
+/* ===== 稿纸模式 v7（整体重构，2026-10-19） =====
+   全局背景平铺唯一画线；一切块统一 34px 行盒节奏；
+   漂移源全部钉死：hr 零高度、代码块去纵向内边距、表格行=33px+1px 边框、
+   嵌套块零边距；H1/H2 跨两行居中并以纸底遮线。 */
+.editor-grid .ProseMirror {
+  --row: 34px;
+  line-height: var(--row);
+  padding: var(--row) 32px 25vh;
+  background-color: var(--paper);
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(var(--row) - 1px),
+    var(--grid-h) calc(var(--row) - 1px)
+  );
+  background-size: 100% var(--row);
+  background-repeat: repeat;
+  background-attachment: local;
+  background-position: 0 -4px;
+}
+.editor-grid .editor-content {
+  padding-bottom: 0;
+}
+.editor-grid .ProseMirror p,
+.editor-grid .ProseMirror li,
+.editor-grid .ProseMirror li p,
+.editor-grid .ProseMirror blockquote p,
+.editor-grid .ProseMirror h3,
+.editor-grid .ProseMirror h4,
+.editor-grid .ProseMirror h5,
+.editor-grid .ProseMirror h6 {
+  line-height: var(--row);
+  margin: 0;
+}
+.editor-grid .ProseMirror > * + * {
+  margin-top: var(--row);
+}
+.editor-grid .ProseMirror h1,
+.editor-grid .ProseMirror h2 {
+  line-height: calc(var(--row) * 2);
+  margin: 0;
+  /* 遮蔽层只覆盖上半段（2×row−6px）：挡住穿过居中文字的中线，
+     露出标题带底行的稿线——修复"H1/H2 吞掉下方一行稿线"的断裂感 */
+  background-image: linear-gradient(var(--grid-cover), var(--grid-cover));
+  background-size: 100% calc(var(--row) * 2 - 6px);
+  background-repeat: no-repeat;
+}
+.editor-grid .ProseMirror ul,
+.editor-grid .ProseMirror ol {
+  padding-left: 2em;
+  margin: 0; /* 几何实测列表块高度恰为 34×项数（2026-10-20 探针证实），
+                 旧版 -1px 负底距补偿已失效，反致其后内容整体漂移 1px */
+}
+.editor-grid .ProseMirror blockquote {
+  padding: 0 1em;
+  margin: 0;
+}
+/* 代码块：隐藏横向滚动条（保留滚动）——经典滚动条占 ~17px 布局高度，
+   恰好半行，会打破行节奏导致其后所有段落穿线（2026-10-20 修复） */
+.editor-grid .ProseMirror pre {
+  line-height: var(--row);
+  padding: 0 16px;
+  /* 块缘贴线：块边界默认相位与稿线光栅差 4px（线在块底上方 4px，为文字坐线设计），
+     代码块为不透明底色块，上下各移 4px 使块缘恰落在线上；底距 +4px 让后续块恢复原相位 */
+  margin: -4px 0 4px 0;
+  scrollbar-width: none;
+}
+.editor-grid .ProseMirror pre::-webkit-scrollbar {
+  height: 0;
+  display: none;
+}
+/* 相位补偿：块体贴线（-4px）后，代码文字需下沉 8px 使文字底与下方稿线
+   保持 2px 间距（与正文坐线一致）；relative 位移不改变布局高度 */
+.editor-grid .ProseMirror pre code {
+  display: block;
+  position: relative;
+  top: 8px;
+}
+/* 表格：separate 边框模型。行盒直接 34px，行线全部用 inset 阴影绘制
+   （零布局占位，总高恒为 34×行数）。与代码块同法 -4/+4 贴线：
+   行分离线（inset 底阴影）恰与背景稿线重合，消除 4px 双线 */
+.editor-grid .ProseMirror table {
+  margin: -4px 0 4px 0;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.editor-grid .ProseMirror th,
+.editor-grid .ProseMirror td {
+  padding: 0 10px;
+  line-height: var(--row);
+  border: none;
+  box-shadow:
+    inset 0 -1px 0 var(--border),
+    inset 1px 0 0 var(--border);
+}
+.editor-grid .ProseMirror th:last-child,
+.editor-grid .ProseMirror td:last-child {
+  box-shadow:
+    inset 0 -1px 0 var(--border),
+    inset 1px 0 0 var(--border),
+    inset -1px 0 0 var(--border);
+}
+.editor-grid .ProseMirror tr:first-child th,
+.editor-grid .ProseMirror tr:first-child td {
+  box-shadow:
+    inset 0 -1px 0 var(--border),
+    inset 0 1px 0 var(--border),
+    inset 1px 0 0 var(--border);
+}
+.editor-grid .ProseMirror tr:first-child th:last-child,
+.editor-grid .ProseMirror tr:first-child td:last-child {
+  box-shadow:
+    inset 0 -1px 0 var(--border),
+    inset 0 1px 0 var(--border),
+    inset 1px 0 0 var(--border),
+    inset -1px 0 0 var(--border);
+}
+/* 单元格内 p 与 td 同为 34px 行盒；表格贴线后行底=稿线，
+   文字需 +4px 下沉复刻正文的"块底与线差 4px"坐线形态 */
+.editor-grid .ProseMirror th p,
+.editor-grid .ProseMirror td p {
+  line-height: var(--row);
+  margin: 0;
+  position: relative;
+  top: 4px;
+}
+.editor-grid .ProseMirror hr {
+  border: none;
+  height: 0;
+  margin: 0;
+}
+
+.editor-empty {
+  height: 100%; display: flex; flex-direction: column; gap: 14px;
+  align-items: center; justify-content: center; color: var(--fg-dim); font-size: 14px;
+}
+
+/* ===== 版本历史面板（FR-SAV-03） ===== */
+.history-panel {
+  position: absolute; top: 0; right: 0; bottom: 0; z-index: 20;
+  width: 340px; display: flex; flex-direction: column;
+  background: var(--bg-editor); border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+}
+.history-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px; border-bottom: 1px solid var(--border);
+}
+.history-title { font-size: 14px; font-weight: 600; }
+.history-list { flex: 1; overflow-y: auto; padding: 8px; }
+.history-item {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 8px; cursor: default;
+}
+.history-item.active { border-color: var(--accent); }
+.hi-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
+.hi-time { color: var(--fg); }
+.hi-src {
+  font-size: 11px; padding: 0 6px; border-radius: 4px; flex: none;
+  background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent);
+}
+.hi-diff { margin-left: auto; color: var(--fg-dim); font-size: 11.5px; flex: none; }
+.hi-note { font-size: 12px; color: var(--fg-dim); margin-top: 4px; }
+.hi-ops { display: flex; gap: 6px; margin-top: 6px; }
+.history-empty {
+  padding: 24px 14px; color: var(--fg-dim); font-size: 12.5px; text-align: center;
+}
+.history-preview {
+  max-height: 40%; border-top: 1px solid var(--border); overflow: auto;
+  background: color-mix(in srgb, var(--border) 20%, var(--bg-editor));
+}
+.history-preview pre {
+  margin: 0; padding: 10px 14px; font-size: 12px; line-height: 1.7;
+  font-family: var(--font-edit); white-space: pre-wrap; user-select: text;
+}
+
+/* ===== 导出面板（FR-EXP） ===== */
+.export-panel { width: 300px; }
+.export-body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.fmt-row { display: flex; gap: 6px; }
+.tool.fmt { padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px; }
+.tool.fmt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.tool.fmt:disabled { opacity: 0.4; cursor: not-allowed; }
+.export-opt { font-size: 12.5px; color: var(--fg-dim); display: flex; gap: 6px; align-items: center; }
+.export-hint { font-size: 12px; color: var(--fg-dim); margin: 0; line-height: 1.6; }
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.btn.primary:disabled { opacity: 0.6; cursor: wait; }
+
+/* ===== 状态栏（FR-EDT-07） ===== */
+footer.statusbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 0 14px; border-top: 1px solid var(--border);
+  background: var(--bg-side); font-size: 12px; color: var(--fg-dim);
+}
+.sb-item { flex: none; }
+.sb-item.dim { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40%; }
+.sb-grow { flex: 1; }
+
+/* ===== 通用控件 ===== */
+.btn {
+  border: 1px solid var(--border); background: var(--bg-editor); color: var(--fg);
+  border-radius: 6px; padding: 5px 14px; font-size: 13px; cursor: pointer;
+}
+.btn:hover { border-color: var(--accent); }
+.btn.small { padding: 2px 10px; font-size: 12px; }
+.btn.ghost { background: transparent; }
+.icon-btn {
+  border: none; background: transparent; color: var(--fg-dim); cursor: pointer;
+  border-radius: 5px; padding: 2px 7px; font-size: 12px;
+}
+.icon-btn:hover { background: color-mix(in srgb, var(--border) 55%, transparent); color: var(--fg); }
+.icon-btn.dim { font-size: 12px; opacity: 0.75; }
+
+/* ===== Toast（FR-UI-06 非模态） ===== */
+.toast {
+  position: fixed; right: 18px; bottom: 44px; z-index: 50;
+  display: flex; align-items: center; gap: 12px;
+  background: var(--fg); color: var(--bg);
+  padding: 10px 16px; border-radius: 10px; font-size: 13px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+.toast .btn { background: transparent; color: var(--bg); border-color: color-mix(in srgb, var(--bg) 40%, transparent); }
