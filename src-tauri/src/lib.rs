@@ -1,6 +1,9 @@
 mod ai;
+mod applog;
+mod backup;
 mod dav;
 mod db;
+mod docx_import;
 mod frontmatter;
 mod library;
 mod pdf;
@@ -55,15 +58,68 @@ fn with_lib<T>(state: &State<AppState>, f: impl FnOnce(&Library) -> CmdResult<T>
 #[tauri::command]
 fn library_startup(state: State<AppState>) -> CmdResult<StartupInfo> {
     let lib = Library::startup()?;
+    applog::set_library_root(&lib.root);
+    applog::info("", &format!("文库已打开：{}", lib.display_root));
+    // 启动序列（FR-DOC-01）：磁盘扫描对账（uuid/id 校验）
+    let audit_warnings = lib.reconcile_ids();
+    if !audit_warnings.is_empty() {
+        applog::warn("", &format!("磁盘对账修复 {} 项", audit_warnings.len()));
+    }
+    // 每日滚动备份（FR-SAV-04）：后台执行，不阻塞启动
+    {
+        let root = lib.root.clone();
+        std::thread::spawn(move || backup::maybe_daily_backup(&root));
+    }
     let info = StartupInfo {
         root: lib.display_root.clone(),
         fresh: lib.fresh,
         pending: lib.journal_pending(),
         thirdparty_warnings: sync::detect_thirdparty_sync(&lib.root),
+        audit_warnings,
+        took_over_stale_lock: lib.took_over_stale_lock,
     };
     let mut guard = state.lib.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(lib);
     Ok(info)
+}
+
+// -- 库切换 / 新建 / 最近库（FR-DOC-01 / FR-UI-05 菜单入口） ------------------------
+
+#[tauri::command]
+fn library_recent_list() -> CmdResult<Vec<String>> {
+    Ok(Library::recent_libraries())
+}
+
+fn open_library_into(state: &State<AppState>, lib: Library) -> CmdResult<StartupInfo> {
+    applog::set_library_root(&lib.root);
+    let audit_warnings = lib.reconcile_ids();
+    let info = StartupInfo {
+        root: lib.display_root.clone(),
+        fresh: lib.fresh,
+        pending: lib.journal_pending(),
+        thirdparty_warnings: sync::detect_thirdparty_sync(&lib.root),
+        audit_warnings,
+        took_over_stale_lock: lib.took_over_stale_lock,
+    };
+    let mut guard = state.lib.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(lib); // 旧库 Drop → 库锁释放
+    Ok(info)
+}
+
+/// 打开已有库（库切换；前端随后重新初始化文档树/同步/AI 会话）
+#[tauri::command]
+fn library_open(state: State<AppState>, path: String) -> CmdResult<StartupInfo> {
+    let lib = Library::open_at(std::path::Path::new(&path))?;
+    lib.remember_recent();
+    open_library_into(&state, lib)
+}
+
+/// 新建库（指定空目录；含《欢迎使用》）
+#[tauri::command]
+fn library_create(state: State<AppState>, path: String) -> CmdResult<StartupInfo> {
+    let lib = Library::create_at(std::path::Path::new(&path))?;
+    lib.remember_recent();
+    open_library_into(&state, lib)
 }
 
 #[tauri::command]
@@ -127,6 +183,86 @@ fn doc_delete(state: State<AppState>, path: String) -> CmdResult<String> {
 #[tauri::command]
 fn trash_restore(state: State<AppState>, trash_name: String, orig_rel: String) -> CmdResult<()> {
     with_lib(&state, |lib| lib.restore_from_trash(&trash_name, &orig_rel))
+}
+
+// -- 回收站面板（FR-DOC-03，M5） ---------------------------------------------------
+
+#[tauri::command]
+fn trash_list(state: State<AppState>) -> CmdResult<Vec<library::TrashEntry>> {
+    with_lib(&state, |lib| Ok(lib.trash_list()))
+}
+
+#[tauri::command]
+fn trash_delete(state: State<AppState>, trash_name: String) -> CmdResult<()> {
+    with_lib(&state, |lib| lib.trash_delete(&trash_name))
+}
+
+#[tauri::command]
+fn trash_empty(state: State<AppState>) -> CmdResult<usize> {
+    with_lib(&state, |lib| lib.trash_empty())
+}
+
+// -- 移动 / 拖拽排序（FR-DOC-02，M5） ----------------------------------------------
+
+#[tauri::command]
+fn doc_move(state: State<AppState>, path: String, dest_folder: String) -> CmdResult<String> {
+    with_lib(&state, |lib| lib.move_doc(&path, &dest_folder))
+}
+
+#[tauri::command]
+fn folder_move(state: State<AppState>, path: String, dest_parent: String) -> CmdResult<String> {
+    with_lib(&state, |lib| lib.move_folder(&path, &dest_parent))
+}
+
+/// 重排序号（步长 10）：ordered_paths 为目标顺序的相对路径列表（同文件夹）
+#[tauri::command]
+fn doc_reorder(state: State<AppState>, folder: String, ordered_paths: Vec<String>) -> CmdResult<Vec<String>> {
+    with_lib(&state, |lib| lib.reorder_docs(&folder, &ordered_paths))
+}
+
+// -- 备份 / 诊断（FR-SAV-04 / FR-SET-03，M5） ---------------------------------------
+
+#[tauri::command]
+fn backup_now(
+    state: State<AppState>,
+    include_attachments: bool,
+    copy_to: Option<String>,
+) -> CmdResult<backup::BackupInfo> {
+    let root = lib_root_of(&state)?;
+    let info = backup::backup_now(&root, include_attachments, copy_to.as_deref())?;
+    applog::info("", &format!("手动备份完成：{}", info.name));
+    Ok(info)
+}
+
+#[tauri::command]
+fn backup_list(state: State<AppState>) -> CmdResult<Vec<backup::BackupInfo>> {
+    let root = lib_root_of(&state)?;
+    Ok(backup::list_backups(&root))
+}
+
+/// 诊断包导出（脱敏；目标路径来自前端系统保存对话框）
+#[tauri::command]
+fn diagnostics_export(state: State<AppState>, dest: String) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    let app_cfg = dirs::config_dir().map(|d| d.join("Writer").join("config.json"));
+    backup::export_diagnostics(&root, app_cfg.as_deref(), &dest)?;
+    applog::info("", "诊断包已导出");
+    Ok(())
+}
+
+/// 前端日志落同一文件（FR-SET-03：request-id 关联）
+#[tauri::command]
+fn log_write(level: String, request_id: String, message: String) -> CmdResult<()> {
+    applog::write(&level, &request_id, &message);
+    Ok(())
+}
+
+/// 日志目录路径（"打开日志目录"入口，经 opener reveal）
+#[tauri::command]
+fn logs_dir() -> CmdResult<String> {
+    applog::logs_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .ok_or_else(|| AppError::new("no_library", "尚未打开文库"))
 }
 
 #[tauri::command]
@@ -281,7 +417,7 @@ async fn sync_now(
     }
     *rt.phase.lock().unwrap_or_else(|e| e.into_inner()) = "scanning".into();
 
-    let (lib_root, settings, password) = {
+    let (lib_root, display_root, settings, password) = {
         let guard = state.lib.lock().unwrap_or_else(|e| e.into_inner());
         let Some(lib) = guard.as_ref() else {
             *rt.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
@@ -293,7 +429,7 @@ async fn sync_now(
             return Ok(SyncRunAck { started: false, reason: "同步未启用".into() });
         }
         let pwd = secrets::get(&sync::secrets_key(&lib.root))?.unwrap_or_default();
-        (lib.root.clone(), s, pwd)
+        (lib.root.clone(), lib.display_root.clone(), s, pwd)
     };
     let dir = match direction.as_deref() {
         Some("upload") => Some(Direction::Upload),
@@ -302,16 +438,36 @@ async fn sync_now(
     };
 
     let rt2 = rt.inner().clone();
+    let display_root2 = display_root;
     tauri::async_runtime::spawn_blocking(move || {
+        fn tagged(mut v: serde_json::Value, root: &str) -> serde_json::Value {
+            if let Some(o) = v.as_object_mut() {
+                o.insert("libRoot".into(), serde_json::json!(root));
+            }
+            v
+        }
+        // panic 守卫：批次闭包 panic（含引擎异常展开）时 running/phase 仍会复位，
+        // 否则同步从此永久拒绝启动（"已有批次进行中"）
+        struct BatchGuard(std::sync::Arc<SyncRuntime>);
+        impl Drop for BatchGuard {
+            fn drop(&mut self) {
+                *self.0.phase.lock().unwrap_or_else(|e| e.into_inner()) = "idle".into();
+                *self.0.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+            }
+        }
+        let _guard = BatchGuard(rt2.clone());
+
         let app2 = app.clone();
         let rt3 = rt2.clone();
+        let dr = display_root2.clone();
         let emitter = move |event: &str, payload: serde_json::Value| {
             if event == "sync:state" {
                 if let Some(p) = payload.get("phase").and_then(|v| v.as_str()) {
                     *rt3.phase.lock().unwrap_or_else(|e| e.into_inner()) = p.to_string();
                 }
             }
-            let _ = app2.emit(event, payload);
+            // 库标识：切库后前端按 libRoot 过滤旧批次事件，防污染新库状态
+            let _ = app2.emit(event, tagged(payload, &dr));
         };
         let result = (|| -> Result<SyncOutcome, AppError> {
             let lib = Library::open_existing(&lib_root)?;
@@ -322,7 +478,7 @@ async fn sync_now(
         match result {
             Ok(SyncOutcome::Done(report)) => {
                 let conflicts = report.conflicts.clone();
-                let v = serde_json::to_value(&report).unwrap_or_default();
+                let v = tagged(serde_json::to_value(&report).unwrap_or_default(), &display_root2);
                 *rt2.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
                 // 冲突累积（解决后由 sync_conflict_resolve 移除）
                 if !conflicts.is_empty() {
@@ -331,21 +487,28 @@ async fn sync_now(
                         .unwrap_or_else(|e| e.into_inner())
                         .extend(conflicts.iter().cloned());
                 }
-                let _ = app.emit("sync:done", serde_json::to_value(&report).unwrap_or_default());
+                let _ = app.emit(
+                    "sync:done",
+                    tagged(serde_json::to_value(&report).unwrap_or_default(), &display_root2),
+                );
             }
             Ok(SyncOutcome::NeedsDirection { local_docs, remote_docs }) => {
                 let _ = app.emit(
                     "sync:needs_direction",
-                    serde_json::json!({ "localDocs": local_docs, "remoteDocs": remote_docs }),
+                    tagged(
+                        serde_json::json!({ "localDocs": local_docs, "remoteDocs": remote_docs }),
+                        &display_root2,
+                    ),
                 );
             }
             Err(e) => {
-                let _ = app.emit("sync:error", serde_json::to_value(&e).unwrap_or_default());
+                let _ = app.emit(
+                    "sync:error",
+                    tagged(serde_json::to_value(&e).unwrap_or_default(), &display_root2),
+                );
             }
         }
-        // 引擎可能已把 bound 置位并落盘，事件侧无需处理；恢复空闲
-        *rt2.phase.lock().unwrap_or_else(|e| e.into_inner()) = "idle".into();
-        *rt2.running.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        // BatchGuard Drop 复位 running/phase（正常与 panic 路径统一）
     });
     Ok(SyncRunAck { started: true, reason: String::new() })
 }
@@ -460,14 +623,30 @@ fn ai_provider_set_default(state: State<AppState>, id: Option<String>) -> CmdRes
     Ok(())
 }
 
-/// 连通性测试（GET /v1/models，不消耗对话 token）
+/// 连通性测试（GET /v1/models，不消耗对话 token）；key 留空时回退已存 Key（DPAPI）
 #[tauri::command]
 async fn ai_connectivity_test(
+    state: State<'_, AppState>,
     ai: State<'_, Arc<ai::AiState>>,
+    provider_id: Option<String>,
     base_url: String,
     api_key: String,
 ) -> Result<TestResult, AppError> {
-    match ai::fetch_models(&ai.client, &base_url, &api_key).await {
+    let key = if api_key.trim().is_empty() {
+        match provider_id.as_deref() {
+            Some(pid) if !pid.is_empty() => {
+                let root = lib_root_of(&state)?;
+                let db = db::MetaDb::open(&root)?; // 校验 meta.db 可用（provider 存储于此）
+                let name = db.provider_get(pid).map(|p| p.name).unwrap_or_default();
+                db.log_request(&name, 0, "test"); // 诊断审计面：测试也是外发（不含内容）
+                secrets::get(&ai::secrets_key(pid))?.unwrap_or_default()
+            }
+            _ => String::new(),
+        }
+    } else {
+        api_key
+    };
+    match ai::fetch_models(&ai.client, &base_url, &key).await {
         Ok(_) => Ok(TestResult { ok: true, message: "连接成功".into() }),
         Err(e) => Ok(TestResult { ok: false, message: e.message }),
     }
@@ -485,6 +664,7 @@ async fn ai_models_fetch(
         .provider_get(&provider_id)
         .ok_or_else(|| AppError::new("not_found", "Provider 不存在"))?;
     let key = secrets::get(&ai::secrets_key(&p.id))?.unwrap_or_default();
+    db.log_request(&p.name, 0, "models"); // 诊断审计面：模型拉取也是外发（不含内容）
     ai::fetch_models(&ai.client, &p.base_url, &key).await
 }
 
@@ -554,6 +734,14 @@ fn ai_message_append(state: State<AppState>, conv_id: String, role: String, cont
     Ok(())
 }
 
+/// 重试前回滚末条失败发送（防 DB 重复行）
+#[tauri::command]
+fn ai_message_delete_last(state: State<AppState>, conv_id: String, role: String) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    db::MetaDb::open(&root)?.message_delete_last(&conv_id, &role)?;
+    Ok(())
+}
+
 #[tauri::command]
 fn ai_request_log(state: State<AppState>, limit: Option<usize>) -> CmdResult<Vec<db::AiRequestLog>> {
     let root = lib_root_of(&state)?;
@@ -591,15 +779,20 @@ fn export_write(path: String, data: Vec<u8>) -> CmdResult<()> {
     Ok(())
 }
 
-/// 导入读取：BOM/UTF-8 优先，GBK 兜底（FR-IMP-01 编码自动检测）
+/// 导入读取：TXT/MD 走编码检测（BOM/UTF-8/GBK）；DOCX 解析转 Markdown 方言（FR-IMP-01）
 #[tauri::command]
 fn import_read(path: String) -> CmdResult<ImportedFile> {
     let bytes = std::fs::read(&path)?;
-    let content = decode_bytes(&bytes);
     let name = std::path::Path::new(&path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "导入文档.md".to_string());
+    if path.to_lowercase().ends_with(".docx") {
+        let md = docx_import::docx_to_md(&bytes)?;
+        let stem = name.trim_end_matches(".docx").trim_end_matches(".DOCX");
+        return Ok(ImportedFile { name: format!("{stem}.md"), content: md });
+    }
+    let content = decode_bytes(&bytes);
     Ok(ImportedFile { name, content })
 }
 
@@ -646,6 +839,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 单实例（FR-SET-04）：二次启动聚焦已有窗口
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .manage(AppState {
             lib: Mutex::new(None),
         })
@@ -682,16 +884,30 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             library_startup,
+            library_recent_list,
+            library_open,
+            library_create,
             doc_list,
             doc_read,
             doc_write,
             doc_create,
             doc_rename,
             doc_delete,
-            trash_restore,
+            doc_move,
+            doc_reorder,
             folder_create,
             folder_rename,
             folder_delete,
+            folder_move,
+            trash_restore,
+            trash_list,
+            trash_delete,
+            trash_empty,
+            backup_now,
+            backup_list,
+            diagnostics_export,
+            log_write,
+            logs_dir,
             snapshot_create,
             snapshot_list,
             snapshot_read,
@@ -718,6 +934,7 @@ pub fn run() {
             ai_conversation_ensure,
             ai_message_list,
             ai_message_append,
+            ai_message_delete_last,
             ai_request_log,
             ai_request_log_clear,
             doc_set_privacy,

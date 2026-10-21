@@ -99,11 +99,14 @@ pub fn export_pdf(app: &AppHandle, title: &str, body: &str, dest: &str) -> Resul
     }
     eprintln!("[pdf] 渲染舱状态: {status}");
 
-    // 先落临时文件再改名，失败不留半截目标文件
+    // 先落临时文件再改名，失败不留半截目标文件；任何失败路径都清理 .tmp 残留
     let tmp = format!("{dest}.tmp");
-    print_to_pdf(app, Path::new(&tmp))?;
-    std::fs::rename(&tmp, dest)
-        .map_err(|e| AppError::new("pdf_io", format!("写入目标失败：{e}")))?;
+    let printed = print_to_pdf(app, Path::new(&tmp))
+        .and_then(|_| std::fs::rename(&tmp, dest).map_err(|e| AppError::new("pdf_io", format!("写入目标失败：{e}"))));
+    if printed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    printed?;
     Ok(())
 }
 

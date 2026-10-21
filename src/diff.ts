@@ -90,11 +90,14 @@ const MAX_CELLS = 4_000_000;
 
 /** 全量 diff：返回 op 序列；超限时回退为单一替换 op（UI 呈现为 1 个块） */
 export function diffOps(a: string, b: string): DiffOp[] {
-  if (a === b) return [{ type: "eq", text: a }];
-  const ta = tokenize(a);
-  const tb = tokenize(b);
+  // 尾换行归一：docToDoc 固定补尾 \n 而模型输出通常没有，不归一会多出"删除空行"幻影块
+  const na = a.replace(/\r?\n$/, "");
+  const nb = b.replace(/\r?\n$/, "");
+  if (na === nb) return [{ type: "eq", text: na }];
+  const ta = tokenize(na);
+  const tb = tokenize(nb);
   if (ta.length * tb.length > MAX_CELLS) {
-    return [...(a ? [{ type: "del" as DiffOpType, text: a }] : []), ...(b ? [{ type: "ins" as DiffOpType, text: b }] : [])];
+    return [...(na ? [{ type: "del" as DiffOpType, text: na }] : []), ...(nb ? [{ type: "ins" as DiffOpType, text: nb }] : [])];
   }
   return lcsOps(ta, tb);
 }

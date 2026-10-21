@@ -64,8 +64,7 @@ impl MetaDb {
         let conn = Connection::open(dir.join("meta.db"))
             .map_err(|e| AppError::new("db", e.to_string()))?;
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             CREATE TABLE IF NOT EXISTS ai_providers(
+            "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS ai_providers(
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL,
                 model TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
                 stream INTEGER NOT NULL DEFAULT 1);
@@ -87,6 +86,14 @@ impl MetaDb {
         )
         .map_err(|e| AppError::new("db", e.to_string()))?;
         Ok(Self { conn })
+    }
+
+    /// WAL checkpoint（备份前调用，FR-SAV-04）：把 -wal 中的最近事务落回主库，
+    /// 否则备份裸拷主库拿到的是旧快照（AI 对话/请求日志静默回退）
+    pub fn checkpoint_wal(&self) -> Result<(), AppError> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(|e| AppError::new("db", e.to_string()))
     }
 
     fn now() -> u64 {
@@ -213,6 +220,19 @@ impl MetaDb {
         }
     }
 
+    /// 删除会话内最后一条指定角色的消息（重试前回滚失败发送，防 DB 翻倍）
+    pub fn message_delete_last(&self, conv_id: &str, role: &str) -> Result<(), AppError> {
+        self.conn
+            .execute(
+                "DELETE FROM ai_messages WHERE id = (
+                    SELECT id FROM ai_messages WHERE conv_id=?1 AND role=?2
+                    ORDER BY id DESC LIMIT 1)",
+                rusqlite::params![conv_id, role],
+            )
+            .map_err(|e| AppError::new("db", e.to_string()))?;
+        Ok(())
+    }
+
     pub fn message_list(&self, conv_id: &str) -> Vec<AiMessage> {
         let mut stmt = match self
             .conn
@@ -253,10 +273,17 @@ impl MetaDb {
 
     // -- 请求日志（FR-AI-06：时间/Provider/字数，不含内容） ----------------------
 
+    /// 上限保护：保留最近 1 万条（B9 体积治理）
+    const REQUEST_LOG_CAP: i64 = 10_000;
+
     pub fn log_request(&self, provider: &str, chars: u64, kind: &str) {
         let _ = self.conn.execute(
             "INSERT INTO ai_request_log(time,provider,chars,kind) VALUES(?,?,?,?)",
             rusqlite::params![Self::now(), provider, chars as i64, kind],
+        );
+        let _ = self.conn.execute(
+            "DELETE FROM ai_request_log WHERE id <= (SELECT id FROM ai_request_log ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+            rusqlite::params![Self::REQUEST_LOG_CAP],
         );
     }
 

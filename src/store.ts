@@ -22,7 +22,7 @@ export const s = reactive({
   saveState: "saved" as SaveState,
   saveError: "",
   savedAt: 0,
-  counts: { words: 0, chars: 0, paragraphs: 0 },
+  counts: { words: 0, chars: 0, paragraphs: 0, selWords: 0, selChars: 0 },
   pendingRecovery: [] as DocPayload[],
   toast: null as { msg: string; undo?: () => void } | null,
   history: {
@@ -43,6 +43,8 @@ export const s = reactive({
     history: [] as SyncLogRow[],
     historyOpen: false,
     settingsOpen: false,
+    /** 保存后自动同步开关（FR-SYN-03，设置面板可关；scheduleAutoSync 消费） */
+    autoSync: true,
     // 首次绑定方向对话框（FR-SYN-07）
     directionAsk: null as { localDocs: number; remoteDocs: number } | null,
     thirdpartyWarnings: [] as string[],
@@ -66,6 +68,16 @@ export function scheduleSave() {
   saveTimer = window.setTimeout(() => void saveNow(), 2000);
 }
 
+// FR-SAV-01：每 30s 兜底保存（长句斟酌中不触发 2s 去抖的连续输入场景）
+window.setInterval(() => {
+  if (s.saveState === "dirty") void saveNow();
+}, 30_000);
+
+/** 取消挂起的 2s 去抖保存（AI 续写触发前调用，防未接受草稿随之落盘） */
+export function cancelScheduledSave() {
+  clearTimeout(saveTimer);
+}
+
 export async function saveNow(): Promise<boolean> {
   const cur = s.current;
   if (!cur || s.saveState === "saving") return true;
@@ -78,6 +90,13 @@ export async function saveNow(): Promise<boolean> {
     const r = await api.writeDoc(cur.path, body, s.lastReadHash);
     s.lastReadHash = r.hash;
     s.savedAt = r.savedAt;
+    const stateAfterSave: string = s.saveState; // await 期间可能被并发置 dirty（TS 收窄失效场景）
+    if (stateAfterSave === "dirty") {
+      // 保存期间又有新输入/AI 接受（scheduleAiSave 置 dirty）：不得回写 saved 吞掉
+      // 未落盘内容——保持 dirty 并立即补一轮（否则接受草稿后关窗即丢稿）
+      saveTimer = window.setTimeout(() => void saveNow(), 100);
+      return true;
+    }
     s.saveState = "saved";
     s.saveError = "";
     scheduleAutoSync(); // FR-SYN-03：保存后 10s 去抖自动同步
@@ -128,11 +147,16 @@ function refreshDocStates() {
 export async function openDoc(path: string, force = false) {
   const ok = force ? true : await flush();
   if (!ok) return;
+  // 切换文档：清理在跑/挂起的 AI 流程（A 文档的草稿区间/润色区间不得写进 B 文档）
+  void import("./aiflow").then((m) => m.resetAiForDocSwitch());
+  const sameDoc = s.current?.path === path;
   const d = await api.readDoc(path);
   s.current = d;
   s.lastReadHash = d.hash;
   s.saveState = "saved";
   s.saveError = "";
+  // 同路径重载（冲突护栏"重新加载磁盘版本"）：path watch 不触发，用 nonce 驱动编辑器重应用
+  if (sameDoc) s.reloadNonce++;
 }
 
 export async function createDoc(folder = s.selectedFolder) {
@@ -155,12 +179,37 @@ export async function renameDoc(path: string, title: string) {
   }
 }
 
-/** FR-DOC-03 撤销式删除：无确认弹窗，5 秒内可撤销 */
+/** 关闭当前文档的统一入口：先清 AI 流程（A 文档草稿/润色区间不得写坏后续文档），
+ * 再丢弃 current。删除/文件夹改名/远端删除传播等所有 s.current=null 路径共用 */
+function closeCurrentDoc() {
+  void import("./aiflow").then((m) => m.resetAiForDocSwitch());
+  s.current = null;
+}
+
+/** 树拖拽等外部场景调用的公开包装 */
+export function closeCurrentDocForTree() {
+  closeCurrentDoc();
+}
+
+/** FR-DOC-03 撤销式删除：单篇无确认弹窗 5 秒可撤销；文件夹走模态确认（白名单） */
 export async function deleteNode(node: TreeNode) {
+  if (node.kind === "folder") {
+    const { confirm } = await import("@tauri-apps/plugin-dialog");
+    const ok = await confirm(
+      `将把文件夹「${node.name}」及其全部内容移入回收站，确定删除？`,
+      { title: "删除文件夹" },
+    );
+    if (!ok) return;
+  }
   const backup = await api.deleteNode(node.id);
-  if (s.current?.path === node.id) {
+  // 当前打开文档位于被删文件夹内（含精确命中）：先 flush 再关闭，
+  // 否则编辑器悬挂在回收站路径上，自动保存持续报错
+  const inDeleted =
+    s.current?.path === node.id ||
+    (node.kind === "folder" && !!s.current?.path.startsWith(node.id + "/"));
+  if (inDeleted) {
     await flush().catch(() => undefined);
-    s.current = null;
+    closeCurrentDoc();
   }
   if (s.selectedFolder === node.id) s.selectedFolder = "";
   await refreshTree();
@@ -177,6 +226,8 @@ export async function deleteNode(node: TreeNode) {
   };
   setTimeout(() => {
     if (s.toast?.msg === msg) s.toast = null;
+    // 撤销窗口到期：冲刷因撤销保护而排队待显的通知
+    void import("./notify").then((m) => m.onToastSlotFreed());
   }, 5000);
 }
 
@@ -192,9 +243,9 @@ export async function renameFolder(path: string, name: string) {
   if (!t) return;
   await flush().catch(() => undefined);
   await api.renameFolder(path, t);
-  // 当前打开文档若在被改名的文件夹内，路径已变：关闭并刷新
+  // 当前打开文档若在被改名的文件夹内，路径已变：清理 AI 状态后关闭并刷新
   if (s.current?.path.startsWith(path + "/") || s.current?.path === path) {
-    s.current = null;
+    closeCurrentDoc();
   }
   if (s.selectedFolder === path) s.selectedFolder = "";
   await refreshTree();
@@ -246,6 +297,16 @@ export async function previewSnapshot(ts: number) {
 
 export async function restoreSnapshot(ts: number) {
   if (!s.current) return;
+  if (s.saveState === "conflict") {
+    // 冲突中的本地未保存编辑不会进 pre_rollback 备份，直接回滚即静默丢失——熔断
+    s.toast = { msg: "存在未解决的保存冲突，请先处理冲突（重新加载或等待保存）再回滚" };
+    setTimeout(() => {
+      if (s.toast?.msg.startsWith("存在未解决的保存冲突")) s.toast = null;
+    }, 5000);
+    return;
+  }
+  // 先落盘：pre_rollback 快照备份的是磁盘内容，未保存的编辑必须先 flush 才不会丢
+  await flush().catch(() => undefined);
   await api.snapshotRestore(s.current.path, ts);
   await reloadHistory();
   await openDoc(s.current.path, true);
@@ -268,32 +329,34 @@ export function currentJson(): PMNode | null {
   return editorGetJson();
 }
 
-/** 导入文件（FR-IMP-01：TXT/MD，TXT 转为空行分段） */
+/** 导入文件（FR-IMP-01：TXT/MD/DOCX；TXT 转空行分段，DOCX 由 Rust 侧解析为 Markdown） */
 export async function importFiles() {
   const { open } = await import("@tauri-apps/plugin-dialog");
   const picked = (await open({
     multiple: true,
-    filters: [{ name: "文本文档", extensions: ["txt", "md", "markdown"] }],
+    filters: [{ name: "文本文档", extensions: ["txt", "md", "markdown", "docx"] }],
   })) as string[] | string | null;
   if (!picked) return;
   const list = Array.isArray(picked) ? picked : [picked];
   let n = 0;
+  const failed: string[] = [];
   for (const p of list) {
     try {
       const f = await api.importRead(p);
       const body = /\.txt$/i.test(f.name) ? txtToBody(f.content) : f.content;
       await api.importDoc(s.selectedFolder, f.name, body);
       n++;
-    } catch {
-      // 单个失败不中断整批
+    } catch (e) {
+      failed.push(`${p.split(/[\\/]/).pop() ?? p}：${(e as { message?: string }).message ?? "读取/写入失败"}`);
     }
   }
   await refreshTree();
-  const msg = `已导入 ${n} 篇文档`;
+  const msg =
+    `已导入 ${n} 篇文档` + (failed.length ? `，${failed.length} 篇失败（${failed.join("；")}）` : "");
   s.toast = { msg };
   setTimeout(() => {
     if (s.toast?.msg === msg) s.toast = null;
-  }, 3000);
+  }, failed.length ? 8000 : 3000);
 }
 
 function txtToBody(t: string): string {
@@ -313,20 +376,116 @@ function firstDoc(nodes: TreeNode[]): TreeNode | null {
   return null;
 }
 
+function treeHasPath(nodes: TreeNode[], path: string): boolean {
+  for (const n of nodes) {
+    if (n.id === path) return true;
+    if (n.children?.length && treeHasPath(n.children, path)) return true;
+  }
+  return false;
+}
+
+// -- 会话（FR-UI-04：直达上次会话——上次文档 + 光标 + 滚动；按库根分键） ------------
+
+interface SessionPos {
+  path: string;
+  head: number;
+  scrollTop: number;
+}
+let pendingSessionPos: SessionPos | null = null;
+const sessionKey = (root: string) => `writer.session.${root}`;
+
+/** 编辑器周期调用（EditorPane 5s interval）：持久化当前会话位置 */
+export function saveSession(pos: { head: number; scrollTop: number } | null) {
+  if (!s.current || !s.root || !pos) return;
+  try {
+    localStorage.setItem(
+      sessionKey(s.root),
+      JSON.stringify({ path: s.current.path, head: pos.head, scrollTop: pos.scrollTop } satisfies SessionPos),
+    );
+  } catch {
+    /* 配额满等：静默 */
+  }
+}
+
+/** EditorPane 应用内容后消费（一次性） */
+export function consumePendingSessionPos(path: string): { head: number; scrollTop: number } | null {
+  if (pendingSessionPos && pendingSessionPos.path === path) {
+    const p = { head: pendingSessionPos.head, scrollTop: pendingSessionPos.scrollTop };
+    pendingSessionPos = null;
+    return p;
+  }
+  pendingSessionPos = null;
+  return null;
+}
+
+/** 启动/库切换共用的就绪流程 */
+async function applyStartup(info: import("./api").StartupInfo) {
+  s.root = info.root;
+  s.pendingRecovery = info.pending;
+  s.sync.thirdpartyWarnings = info.thirdpartyWarnings ?? [];
+  s.current = null;
+  s.tree = [];
+  s.saveState = "saved";
+  s.lastReadHash = "";
+  s.sync.conflicts = [];
+  s.sync.last = null;
+  s.sync.phase = "idle";
+  s.sync.running = false;
+  await refreshTree();
+
+  // 会话恢复：上次文档 + 光标/滚动（FR-UI-04）；无会话则回退第一篇
+  let opened = false;
+  try {
+    const raw = localStorage.getItem(sessionKey(s.root));
+    if (raw) {
+      const sess = JSON.parse(raw) as SessionPos;
+      if (treeHasPath(s.tree, sess.path)) {
+        pendingSessionPos = sess;
+        await openDoc(sess.path);
+        opened = true;
+      }
+    }
+  } catch {
+    /* 会话损坏：回退 */
+  }
+  if (!opened) {
+    const first = firstDoc(s.tree);
+    if (first) await openDoc(first.id);
+  }
+
+  // 启动告警入通知中心（磁盘对账修复 / 崩溃残留锁接管 / 双引擎）
+  const { notify } = await import("./notify");
+  for (const w of info.auditWarnings ?? []) notify("system", `磁盘对账：${w}`);
+  if (info.tookOverStaleLock) {
+    notify("system", "检测到上次异常退出的库锁残留，已自动接管（若另一窗口仍在使用本库请勿同时编辑）");
+  }
+  for (const w of info.thirdpartyWarnings ?? []) {
+    notify("sync", `文库位于第三方同步盘（${w}）范围内，双引擎可能冲突`, {
+      actionLabel: "同步设置",
+      action: () => (s.sync.settingsOpen = true),
+    });
+  }
+}
+
+/** 库切换/新建（FR-DOC-01/FR-UI-05 菜单入口）：就绪流程 + 同步/AI 重接线（监听器已防重） */
+export async function switchLibrary(path: string, create: boolean) {
+  // 边界 flush（FR-SAV-01）：切库是保存边界，未落盘输入不得丢失
+  clearTimeout(saveTimer);
+  await flush().catch(() => undefined);
+  // 清空 AI 会话绑定（旧库 convId 在新库 meta.db 是孤儿行，防串库）
+  void import("./aiflow").then((m) => m.resetChatForLibrary());
+  const info = create ? await api.libraryCreate(path) : await api.libraryOpen(path);
+  await applyStartup(info);
+  void initSync();
+  void import("./aiflow").then((m) => m.initAi());
+}
+
 /** FR-UI-04：直达上次会话（M1 = 打开第一篇）；onStep 用于启动屏进度诊断 */
 export async function init(onStep?: (msg: string) => void) {
   onStep?.("正在打开文库…");
   const info = await api.startup();
-  s.root = info.root;
-  s.pendingRecovery = info.pending;
-  s.sync.thirdpartyWarnings = info.thirdpartyWarnings ?? [];
   onStep?.("读取文档树…");
-  await refreshTree();
-  const first = firstDoc(s.tree);
-  if (first) {
-    onStep?.("打开文档…");
-    await openDoc(first.id);
-  }
+  await applyStartup(info);
   s.ready = true;
   void initSync(); // 同步接线失败不影响主功能（3.3-1 离线优先）
   void import("./aiflow").then((m) => m.initAi()); // AI 接线（离线优先同理）
@@ -366,8 +525,10 @@ export function bindEditorPos(getPos: () => { head: number; scrollTop: number } 
 
 let autoSyncTimer: number | undefined;
 
-/** FR-SYN-03：保存成功后 10s 去抖自动同步（输入不打扰，静默执行） */
+/** FR-SYN-03：保存成功后 10s 去抖自动同步（输入不打扰，静默执行）。
+ * 尊重设置面板的"保存后自动同步"开关（默认开） */
 export function scheduleAutoSync() {
+  if (s.sync.autoSync === false) return;
   clearTimeout(autoSyncTimer);
   autoSyncTimer = window.setTimeout(() => void triggerSync(), 10_000);
 }
@@ -445,25 +606,43 @@ async function onExternalChange(path: string, _hash: string) {
   }, 4000);
 }
 
-/** 启动同步接线：init() 完成后调用一次 */
+/** 启动同步接线：init() 完成后调用一次；库切换重复调用时仅刷新状态（监听器防重） */
+let syncListenersReady = false;
 export async function initSync() {
+  if (syncListenersReady) {
+    await reloadSyncStatus().catch(() => undefined);
+    const cfg = await api.syncConfigGet().catch(() => null);
+    if (cfg) {
+      s.sync.autoSync = cfg.autoSync;
+      if (cfg.enabled) void triggerSync();
+      setupPeriodicSync();
+    }
+    return;
+  }
+  // 半注册追踪：try 外声明，catch 块能卸掉已注册的监听器（否则重跑会双份监听）
+  const unlistens: (() => void)[] = [];
   try {
     await reloadSyncStatus();
     const { listen } = await import("@tauri-apps/api/event");
-    const unlistens: (() => void)[] = [];
+    const { notify } = await import("./notify");
+    // 库标识守卫：切库后旧批次事件不得污染新库（后端 sync:* / doc:* 事件均带 libRoot）
+    const fromCurrentLib = (p: { libRoot?: string }) => !p.libRoot || p.libRoot === s.root;
     unlistens.push(
-      await listen<{ phase: string }>("sync:state", (e) => {
+      await listen<{ phase: string; libRoot?: string }>("sync:state", (e) => {
+        if (!fromCurrentLib(e.payload)) return;
         s.sync.phase = e.payload.phase;
         s.sync.running = e.payload.phase !== "idle";
       }),
     );
     unlistens.push(
-      await listen<{ path: string; hash: string }>("doc:external_change", (e) => {
+      await listen<{ path: string; hash: string; libRoot?: string }>("doc:external_change", (e) => {
+        if (!fromCurrentLib(e.payload)) return;
         void onExternalChange(e.payload.path, e.payload.hash);
       }),
     );
     unlistens.push(
-      await listen<{ path: string; copyPath: string }>("sync:conflict", (e) => {
+      await listen<{ path: string; copyPath: string; libRoot?: string }>("sync:conflict", (e) => {
+        if (!fromCurrentLib(e.payload)) return;
         if (!s.sync.conflicts.some((c) => c.copyPath === e.payload.copyPath)) {
           s.sync.conflicts.push({
             uuid: "",
@@ -471,19 +650,22 @@ export async function initSync() {
             copyPath: e.payload.copyPath,
           });
         }
-        s.toast = { msg: "检测到同步冲突，已保留两个版本，请到同步面板处理" };
-        setTimeout(() => {
-          if (s.toast?.msg.startsWith("检测到同步冲突")) s.toast = null;
-        }, 6000);
+        notify("conflict", "检测到同步冲突，已保留两个版本", {
+          actionLabel: "去处理",
+          action: () => (s.sync.conflicts.length = s.sync.conflicts.length),
+        });
       }),
     );
     unlistens.push(
-      await listen<{ localDocs: number; remoteDocs: number }>("sync:needs_direction", (e) => {
+      await listen<{ localDocs: number; remoteDocs: number; libRoot?: string }>("sync:needs_direction", (e) => {
+        if (!fromCurrentLib(e.payload)) return;
         s.sync.directionAsk = e.payload; // 非模态提示 + 显式选择（3.3-5 白名单允许）
       }),
     );
     unlistens.push(
       await listen<SyncReport>("sync:done", async (e) => {
+        // 库标识过滤：切库后旧批次的事件不得污染新库状态（后端事件带 libRoot）
+        if (e.payload.libRoot && e.payload.libRoot !== s.root) return;
         s.sync.running = false;
         s.sync.phase = "idle";
         s.sync.last = e.payload;
@@ -492,37 +674,68 @@ export async function initSync() {
       }),
     );
     unlistens.push(
-      await listen<{ message: string }>("sync:error", (e) => {
+      await listen<{ message: string; libRoot?: string }>("sync:warning", (e) => {
+        if (e.payload.libRoot && e.payload.libRoot !== s.root) return;
+        // 批次内告警：走 notify 管线（输入保护 + 通知中心沉淀），不直写 toast
+        notify("sync", `同步提示：${e.payload.message}`);
+      }),
+    );
+    unlistens.push(
+      await listen<{ message: string; libRoot?: string }>("sync:error", (e) => {
+        if (e.payload.libRoot && e.payload.libRoot !== s.root) return;
         s.sync.running = false;
-        s.toast = { msg: `同步失败：${e.payload.message}` };
-        setTimeout(() => {
-          if (s.toast?.msg.startsWith("同步失败")) s.toast = null;
-        }, 5000);
+        notify("sync", `同步失败：${e.payload.message}`, {
+          actionLabel: "同步历史",
+          action: () => void openSyncHistory(),
+        });
       }),
     );
     unlistens.push(
-      await listen<{ path: string }>("sync:trashed", async (e) => {
-        // 对端删除传播：本端文档进回收站
+      await listen<{ path: string; libRoot?: string }>("sync:trashed", async (e) => {
+        if (e.payload.libRoot && e.payload.libRoot !== s.root) return;
+        // 对端删除传播：本端文档进回收站（关闭前 flush，<2s 未落盘输入不丢）
         await refreshTree();
-        if (s.current?.path === e.payload.path) s.current = null;
+        if (s.current?.path === e.payload.path) {
+          await flush().catch(() => undefined);
+          closeCurrentDoc();
+        }
       }),
     );
     unlistens.push(
-      await listen<{ from: string; to: string }>("doc:renamed", async (e) => {
-        // 远端改名跟随：当前打开文档路径变化
+      await listen<{ from: string; to: string; libRoot?: string }>("doc:renamed", async (e) => {
+        if (e.payload.libRoot && e.payload.libRoot !== s.root) return;
+        // 远端改名跟随：当前打开文档路径变化（保存中的内容先落盘）
         await refreshTree();
         if (s.current?.path === e.payload.from) {
+          await flush().catch(() => undefined);
           const d = await api.readDoc(e.payload.to);
           s.current = { ...d, path: e.payload.to };
           s.lastReadHash = d.hash;
         }
       }),
     );
-    // 启动时自动同步一次（FR-SYN-03）
+    // 启动时自动同步一次（FR-SYN-03）+ 可配置定时同步（长开时对端更新可达）
     const cfg = await api.syncConfigGet();
+    s.sync.autoSync = cfg.autoSync;
     if (cfg.enabled) void triggerSync();
+    setupPeriodicSync();
+    syncListenersReady = true;
     return () => unlistens.forEach((u) => u());
   } catch {
+    // 半注册清理：中途失败时卸掉已注册的监听器（否则库切换重跑会双份监听）
+    unlistens.forEach((u) => u());
     return () => undefined; // 同步接线失败不影响主功能（离线优先）
+  }
+}
+
+// FR-SYN-03 定时同步：长开应用周期性拉取对端更新（默认 5 分钟；0=关）
+let periodicTimer: number | undefined;
+export function setupPeriodicSync() {
+  clearInterval(periodicTimer);
+  const minutes = Number(localStorage.getItem("writer.sync.interval") ?? 5);
+  if (minutes > 0 && s.sync.autoSync) {
+    periodicTimer = window.setInterval(() => {
+      if (!s.sync.running && s.sync.autoSync) void triggerSync();
+    }, minutes * 60_000);
   }
 }

@@ -35,7 +35,8 @@ code { font-family: Consolas, "Cascadia Code", monospace; font-size: 0.9em; }
 pre { background: #f5f4f1; border-radius: 4pt; padding: 8pt 12pt; font-size: 9.5pt; line-height: 1.6; white-space: pre-wrap; break-inside: auto; }
 pre code { display: block; }
 table { border-collapse: collapse; width: 100%; margin: 0.8em 0; font-size: 10pt; }
-th, td { border: 0.5pt solid #b5b0a4; padding: 4pt 8pt; text-align: left; vertical-align: top; }
+th, td { border: 0.5pt solid #b5b0a4; padding: 4pt 8pt; vertical-align: top; }
+/* text-align 不在此强制 left：单元格 style（列对齐/居中）与 exportHtml 内嵌样式生效（FR-UI-03 同源） */
 th { background: #f0efec; font-weight: 600; }
 th p, td p { margin: 0; }
 img { max-width: 100%; }

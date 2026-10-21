@@ -11,7 +11,14 @@ import ConflictView from "./components/ConflictView.vue";
 import DirectionAsk from "./components/DirectionAsk.vue";
 import AiSettings from "./components/AiSettings.vue";
 import ChatPanel from "./components/ChatPanel.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
+import NotificationCenter from "./components/NotificationCenter.vue";
+import TrashPanel from "./components/TrashPanel.vue";
+import HelpOverlay from "./components/HelpOverlay.vue";
 import { ai } from "./aiflow";
+import { initTheme } from "./theme";
+import { initLayout } from "./layout";
+import { markTyping } from "./notify";
 import {
   s,
   init,
@@ -25,10 +32,51 @@ import {
 
 const bootMsg = ref("正在启动…");
 const bootErr = ref("");
+const settingsOpen = ref(false);
+const trashOpen = ref(false);
+const helpOpen = ref(false);
 
 let unlistenClose: (() => void) | null = null;
 
+// -- 布局（FR-UI-02）：侧栏/讨论栏可拖宽、可隐藏；记忆 --------------------------------
+const sidebarW = ref(Number(localStorage.getItem("writer.w.sidebar")) || 232);
+const chatW = ref(Number(localStorage.getItem("writer.w.chat")) || 340);
+const sidebarHidden = ref(localStorage.getItem("writer.h.sidebar") === "1");
+let dragging: "" | "sidebar" | "chat" = "";
+
+function startDrag(which: "sidebar" | "chat") {
+  dragging = which;
+}
+function onDragMove(e: MouseEvent) {
+  if (!dragging) return;
+  if (dragging === "sidebar") {
+    sidebarW.value = Math.min(460, Math.max(170, e.clientX));
+  } else {
+    chatW.value = Math.min(560, Math.max(260, window.innerWidth - e.clientX));
+  }
+}
+function endDrag() {
+  if (!dragging) return;
+  dragging = "";
+  localStorage.setItem("writer.w.sidebar", String(sidebarW.value));
+  localStorage.setItem("writer.w.chat", String(chatW.value));
+}
+
+/** 窗口收窄时重夹栏宽：记忆宽度不得把编辑区压没（最小主区 420px） */
+function onResize() {
+  const maxChat = window.innerWidth - (sidebarHidden.value ? 0 : sidebarW.value) - 420;
+  if (maxChat > 260 && chatW.value > maxChat) chatW.value = Math.floor(maxChat);
+  const maxSide = window.innerWidth - 420 - (ai.chatOpen ? 260 : 0);
+  if (maxSide > 170 && sidebarW.value > maxSide) sidebarW.value = Math.floor(maxSide);
+}
+function toggleSidebar() {
+  sidebarHidden.value = !sidebarHidden.value;
+  localStorage.setItem("writer.h.sidebar", sidebarHidden.value ? "1" : "0");
+}
+
 onMounted(async () => {
+  initTheme();
+  initLayout();
   // 稿纸对齐保障：强制缩放 100% 并禁用页面缩放热键——
   // 非整数缩放下行盒与背景平铺取整路径不同，误差逐行累积导致横线穿字
   void getCurrentWebviewWindow()
@@ -36,11 +84,14 @@ onMounted(async () => {
     .catch(() => undefined);
   window.addEventListener("wheel", blockZoomWheel, { passive: false });
   window.addEventListener("keydown", blockZoomKeys, true);
+  window.addEventListener("mousemove", onDragMove);
+  window.addEventListener("mouseup", endDrag);
+  window.addEventListener("resize", onResize);
   window.addEventListener("unhandledrejection", onUnhandled);
   try {
     await init((m) => (bootMsg.value = m));
-    // FR-SAV-01 边界 flush：关闭窗口前强制保存——但保存失败/超时绝不阻塞关窗
-    // （journal 机制兜底：未落盘内容下次启动可恢复）
+    // FR-SAV-01 边界 flush + FR-SYN-03 退出提示：关闭前强制保存（失败/超时不阻塞）；
+    // 同步批次进行中先非模态提示再关（未完成部分下次启动继续）
     const win = getCurrentWindow();
     unlistenClose = await win.onCloseRequested(async (e) => {
       e.preventDefault();
@@ -48,6 +99,10 @@ onMounted(async () => {
         await Promise.race([flush(), new Promise((r) => setTimeout(r, 3000))]);
       } catch {
         // 保存异常也继续关窗
+      }
+      if (s.sync.running) {
+        s.toast = { msg: "同步仍在进行，将中断并在下次启动继续…" };
+        await new Promise((r) => setTimeout(r, 1200));
       }
       try {
         await win.destroy();
@@ -91,9 +146,20 @@ onBeforeUnmount(() => {
   window.removeEventListener("unhandledrejection", onUnhandled);
   window.removeEventListener("wheel", blockZoomWheel);
   window.removeEventListener("keydown", blockZoomKeys, true);
+  window.removeEventListener("mousemove", onDragMove);
+  window.removeEventListener("mouseup", endDrag);
+  window.removeEventListener("resize", onResize);
 });
 
 async function onKey(e: KeyboardEvent) {
+  // F1 帮助（FR-UI-07：本地内置）
+  if (e.key === "F1") {
+    e.preventDefault();
+    helpOpen.value = !helpOpen.value;
+    return;
+  }
+  // 输入保护（FR-UI-06）：任何编辑键都刷新"正在输入"时间戳
+  markTyping();
   const ctrl = e.ctrlKey || e.metaKey;
   if (!ctrl) return;
   const k = e.key.toLowerCase();
@@ -143,16 +209,35 @@ async function onKey(e: KeyboardEvent) {
       <button class="icon-btn" title="本次忽略" @click="s.sync.thirdpartyWarnings = []">✕</button>
     </div>
 
-    <aside class="sidebar">
-      <DocTree />
-    </aside>
+    <button
+      v-if="sidebarHidden"
+      class="side-peek icon-btn"
+      title="展开文库侧栏"
+      @click="toggleSidebar"
+    >☰</button>
+    <div class="mid">
+      <aside v-if="!sidebarHidden" class="sidebar" :style="{ width: sidebarW + 'px', flex: 'none' }">
+        <DocTree @open-trash="trashOpen = true" @open-settings="settingsOpen = true" />
+      </aside>
+      <div
+        v-if="!sidebarHidden"
+        class="splitter"
+        title="拖动调整宽度"
+        @mousedown.prevent="startDrag('sidebar')"
+      >
+        <button class="split-btn" title="收起侧栏" @click="toggleSidebar">‹</button>
+      </div>
 
-    <main class="main">
-      <EditorPane />
-    </main>
+      <main class="main">
+        <EditorPane />
+      </main>
 
-    <!-- AI 讨论侧栏（FR-AI-04） -->
-    <ChatPanel v-if="ai.chatOpen && ai.enabled" />
+      <!-- AI 讨论侧栏（FR-AI-04）：可拖宽/关闭 -->
+      <template v-if="ai.chatOpen && ai.enabled">
+        <div class="splitter" title="拖动调整宽度" @mousedown.prevent="startDrag('chat')"></div>
+        <ChatPanel :style="{ width: chatW + 'px', flex: 'none' }" />
+      </template>
+    </div>
 
     <!-- AI 设置面板（FR-AI-01） -->
     <AiSettings v-if="ai.settingsOpen" />
@@ -166,7 +251,17 @@ async function onKey(e: KeyboardEvent) {
     <!-- 首次绑定方向选择（FR-SYN-07：模态白名单） -->
     <DirectionAsk />
 
-    <StatusBar />
+    <!-- 设置中心 / 通知中心 / 回收站 / 帮助（M5） -->
+    <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
+    <NotificationCenter />
+    <TrashPanel v-if="trashOpen" @close="trashOpen = false" />
+    <HelpOverlay v-if="helpOpen" @close="helpOpen = false" />
+
+    <StatusBar
+      @open-settings="settingsOpen = true"
+      @open-trash="trashOpen = true"
+      @open-help="helpOpen = true"
+    />
 
     <!-- 撤销式删除通知（FR-DOC-03） -->
     <div v-if="s.toast" class="toast">

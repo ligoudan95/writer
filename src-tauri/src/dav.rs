@@ -148,9 +148,14 @@ impl StorageBackend for DavBackend {
     }
 
     fn list_all(&mut self) -> Result<Vec<RemoteEntry>, AppError> {
+        // 上限防护：恶意服务器无限返回新目录可令队列永不排空（同步线程挂死）
+        const MAX_REMOTE_ENTRIES: usize = 50_000;
         let mut out = Vec::new();
         let mut queue = vec![String::new()]; // 远端根
         while let Some(dir) = queue.pop() {
+            if out.len() >= MAX_REMOTE_ENTRIES {
+                return Err(AppError::new("net", "远端条目数超过上限（疑似异常响应）"));
+            }
             let url = if dir.is_empty() { self.base.clone() } else { self.url_of(&dir) };
             let resp = self.request("PROPFIND", &url, Some("1"), &[], Some(PROPFIND_BODY.as_bytes().to_vec()))?;
             let text = resp.text().map_err(|e| AppError::new("net", e.to_string()))?;
@@ -160,6 +165,11 @@ impl StorageBackend for DavBackend {
                     continue;
                 }
                 let full = if dir.is_empty() { entry.path.clone() } else { format!("{dir}/{}", entry.path) };
+                // 安全闸（P0）：恶意服务器的文件名（../、\、绝对段、控制字符）一旦
+                // 进入本地路径拼接即可写出库外任意路径——非法条目直接丢弃
+                if !safe_remote_path(&full) {
+                    continue;
+                }
                 if entry.is_dir {
                     queue.push(full.clone());
                 }
@@ -279,6 +289,22 @@ fn decode_path(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// 远端相对路径安全校验：每段必须非空、非 ./..、无反斜杠、无控制字符、长度合法。
+/// 防恶意服务器以 PROPFIND 文件名（`..%2F..`、`C:\…` 等）实施路径穿越
+pub(crate) fn safe_remote_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > 1024 {
+        return false;
+    }
+    path.split('/').all(|comp| {
+        !comp.is_empty()
+            && comp != "."
+            && comp != ".."
+            && !comp.contains('\\')
+            && comp.len() <= 255
+            && !comp.chars().any(|c| c.is_control())
+    })
+}
+
 /// XML 基本实体解码（etag 等）
 fn decode_entities(s: &str) -> String {
     if !s.contains('&') {
@@ -304,7 +330,7 @@ fn hex(b: Option<&u8>) -> Option<u8> {
 
 /// 解析 PROPFIND 207 响应，返回**该目录下的直接子条目名**（前缀无关：d:/D:/无前缀）。
 /// 逐个 '<' 扫描标签按 local name 匹配，不依赖 XML 库（响应结构稳定、字段有限）。
-fn parse_propfind(xml: &str) -> Vec<RemoteEntry> {
+pub(crate) fn parse_propfind(xml: &str) -> Vec<RemoteEntry> {
     let mut out = Vec::new();
     // 按 local name "response" 切块
     let mut blocks: Vec<&str> = Vec::new();
@@ -340,9 +366,21 @@ fn parse_propfind(xml: &str) -> Vec<RemoteEntry> {
     }
     for block in blocks {
         let Some(href) = extract_tag(block, "href") else { continue };
-        // <d:collection/> 或 <collection/>（前缀无关）
-        let lower_block = block.to_lowercase();
-        let is_dir = lower_block.contains(":collection") || lower_block.contains("<collection");
+        // href 中的 XML 实体必须解码（文件名含 &amp; 等时与真实名保持一致）
+        let href = decode_entities(&href);
+        // 目录判定仅认 <resourcetype> 开闭标签之间的 <collection>（local name 匹配，
+        // 忽略 ns 前缀）：子串匹配会把文件名/etag 恰含 ":collection" 的普通文件误判为目录，
+        // 进而被引擎当作"远端缺失"把本地文档移入回收站；自闭合 <resourcetype/> 无第二次出现 → 非目录
+        let is_dir = {
+            let lower = block.to_lowercase();
+            let mut it = lower.match_indices("resourcetype");
+            match (it.next(), it.next()) {
+                (Some((i, _)), Some((j, _))) => {
+                    lower[i + "resourcetype".len()..j].contains("collection")
+                }
+                _ => false,
+            }
+        };
         let etag = extract_tag(block, "getetag").unwrap_or_default();
         let size = extract_tag(block, "getcontentlength")
             .and_then(|s| s.trim().parse().ok())
@@ -374,9 +412,11 @@ fn parse_propfind(xml: &str) -> Vec<RemoteEntry> {
     out
 }
 
-/// 提取任意命名空间前缀下 <ns:tag>…</ns:tag> 的文本（大小写不敏感，剥 CDATA）
+/// 提取任意命名空间前缀下 <ns:tag>…</ns:tag> 的文本（大小写不敏感，剥 CDATA）。
+/// 大小写折叠用 to_ascii_lowercase：字节长度不变，索引可安全跨界用于原串切片
+/// （Unicode to_lowercase 可能变长，如 ß→SS，跨串索引会切在非字符边界上 panic）
 fn extract_tag(block: &str, tag: &str) -> Option<String> {
-    let lower = block.to_lowercase();
+    let lower = block.to_ascii_lowercase();
     let bytes = block.as_bytes();
     let mut i = 0usize;
     while i < lower.len() {
@@ -442,6 +482,8 @@ pub mod mock {
         pub files: BTreeMap<String, Vec<u8>>,
         pub ops: Vec<String>,
         fail_next: Option<AppError>,
+        /// 模拟真实服务器：etag 返回自身值而非内容 hash（覆盖"附件增量"回归）
+        pub opaque_etag: bool,
     }
 
     impl MockDav {
@@ -470,7 +512,11 @@ pub mod mock {
                 out.push(RemoteEntry {
                     path: p.clone(),
                     is_dir: false,
-                    etag: crate::library::hash_hex(data),
+                    etag: if self.opaque_etag {
+                        format!("W/\"{}\"", data.len()) // 服务器自身口径，与 blake3 恒不相等
+                    } else {
+                        crate::library::hash_hex(data)
+                    },
                     size: data.len() as u64,
                 });
                 let mut parent = p.as_str();
@@ -493,7 +539,11 @@ pub mod mock {
             self.check_fail()?;
             self.ops.push(format!("put {path}"));
             self.files.insert(path.to_string(), data.to_vec());
-            Ok(crate::library::hash_hex(data))
+            Ok(if self.opaque_etag {
+                format!("W/\"{}\"", data.len())
+            } else {
+                crate::library::hash_hex(data)
+            })
         }
 
         fn mv(&mut self, from: &str, to: &str) -> Result<(), AppError> {

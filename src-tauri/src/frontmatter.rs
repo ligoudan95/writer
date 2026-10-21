@@ -48,6 +48,7 @@ pub fn split(content: &str) -> (Option<Frontmatter>, String) {
         .unwrap_or(rest);
 
     let mut fm = Frontmatter::default();
+    let mut fm_valid = true;
     let mut body_from: Option<usize> = None; // 行索引（含）
     for (i, line) in rest.lines().enumerate() {
         let l = line.trim_end();
@@ -55,9 +56,27 @@ pub fn split(content: &str) -> (Option<Frontmatter>, String) {
             body_from = Some(i);
             break;
         }
-        if let Some((k, v)) = l.split_once(':') {
-            fm.set(k.trim(), v.trim());
+        if l.trim().is_empty() {
+            continue; // 空行容忍
         }
+        // YAML 块列表续行（缩进/- 开头，如 tags:\n  - a）：不入 fm（本实现只存标量），
+        // 但不否定 fm 本身——否则外来合法文档丢 uuid、掉出同步体系。
+        // 完整 YAML 兼容（保留列表值）列为 M5 事项
+        if l.starts_with([' ', '\t']) || l.trim_start().starts_with("- ") {
+            continue;
+        }
+        match l.split_once(':') {
+            Some((k, v)) if !k.trim().is_empty() => fm.set(k.trim(), v.trim()),
+            // 非 key:value 行（如正文首行是分隔线后的普通文字）：不是 frontmatter，
+            // 整块退回正文——否则该行会在下次保存时被静默丢弃（真实数据丢失）
+            _ => {
+                fm_valid = false;
+                break;
+            }
+        }
+    }
+    if !fm_valid {
+        return (None, content.to_string());
     }
     match body_from {
         Some(idx) => {

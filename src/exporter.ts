@@ -17,6 +17,23 @@ import {
 } from "docx";
 
 // ---------------------------------------------------------------------------
+// 导出前处理：H1 去重（FR-DOC-05：正文首个 H1 与文档标题相同时不重复输出，各 Exporter 统一遵循）
+// ---------------------------------------------------------------------------
+
+export function dedupeTitleH1(doc: PMNode, title?: string): PMNode {
+  const t = (title ?? "").trim();
+  if (!t) return doc;
+  // 规格语义是"正文首个 H1"（不一定是第一块：引言段在前也有效）
+  const idx = (doc.content ?? []).findIndex(
+    (n) => n.type === "heading" && Number(n.attrs?.level ?? 0) === 1,
+  );
+  if (idx < 0) return doc;
+  const text = textOf(doc.content![idx]).trim();
+  if (text !== t) return doc;
+  return { ...doc, content: (doc.content ?? []).filter((_, i) => i !== idx) };
+}
+
+// ---------------------------------------------------------------------------
 // TXT：剥离标记，保留标题文字（FR-EXP-02）
 // ---------------------------------------------------------------------------
 
@@ -34,11 +51,15 @@ export function exportTxt(doc: PMNode, crlf = false): string {
           lines.push("");
           break;
         case "bulletList":
-          walk(n.content ?? [], prefix + "  ");
+          walk(n.content ?? [], prefix + "· ");
+          break;
+        case "listItem":
+          walk(n.content ?? [], prefix);
           break;
         case "orderedList":
           (n.content ?? []).forEach((item, i) => {
-            lines.push(`${prefix}${i + 1}. ${textOf(item)}`);
+            const no = Number(n.attrs?.start ?? 1) + i; // 尊重 start（内容保真）
+            lines.push(`${prefix}${no}. ${textOf(item)}`);
             lines.push("");
           });
           break;
@@ -89,8 +110,8 @@ function textOf(node: PMNode): string {
 // MD：方言直出（FR-EXP-03，M2 初版默认不含 frontmatter）
 // ---------------------------------------------------------------------------
 
-export function exportMd(doc: PMNode): string {
-  return docToMd(doc);
+export function exportMd(doc: PMNode, frontmatter = ""): string {
+  return frontmatter + docToMd(doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -150,8 +171,16 @@ function listHtml(n: PMNode): string {
   return listItemsHtml(n.content ?? [], "ul");
 }
 
-export function exportHtml(doc: PMNode): string {
+/** HTML 正文片段（PDF 渲染舱消费）。传 lt 时内嵌与屏幕同源的排版样式（FR-UI-03） */
+export function exportHtml(doc: PMNode, lt?: ExportLayout): string {
   const out: string[] = [];
+  if (lt) {
+    out.push(
+      `<style>.pm-body{font-family:${lt.fontFamily};font-size:${lt.fontSize}px;line-height:${lt.lineHeight};}` +
+        `.pm-body p{margin:0 0 ${lt.paraGap}px;}${lt.indent ? ".pm-body p{text-indent:2em;}" : ""}</style>` +
+        `<div class="pm-body">`,
+    );
+  }
   for (const n of doc.content ?? []) {
     switch (n.type) {
       case "heading": {
@@ -179,13 +208,21 @@ export function exportHtml(doc: PMNode): string {
         break;
       }
       case "table": {
+        const cellAttrs = (cell: PMNode): string => {
+          let s = "";
+          if (cell.attrs?.colspan) s += ` colspan="${Number(cell.attrs.colspan)}"`;
+          if (cell.attrs?.rowspan) s += ` rowspan="${Number(cell.attrs.rowspan)}"`;
+          const style = String(cell.attrs?.style ?? "");
+          if (/^text-align:(left|center|right)$/i.test(style)) s += ` style="${style}"`;
+          return s;
+        };
         const rows = (n.content ?? [])
           .map(
             (row, ri) =>
               `<tr>${(row.content ?? [])
                 .map((cell) => {
-                  const tag = ri === 0 ? "th" : "td";
-                  return `<${tag}>${(cell.content ?? [])
+                  const tag = ri === 0 && cell.type === "tableHeader" ? "th" : "td";
+                  return `<${tag}${cellAttrs(cell)}>${(cell.content ?? [])
                     .map((p) => `<p>${inlineHtml(p.content ?? [])}</p>`)
                     .join("")}</${tag}>`;
                 })
@@ -203,16 +240,48 @@ export function exportHtml(doc: PMNode): string {
         break;
     }
   }
-  return out.join("\n");
+  const html = out.join("\n");
+  return lt ? html + "</div>" : html;
 }
 
 // ---------------------------------------------------------------------------
-// DOCX（FR-EXP-04）：内容保真级排版
+// DOCX（FR-EXP-04）：内容保真级排版；排版参数与屏幕同源（FR-UI-03 单源消费）
 // ---------------------------------------------------------------------------
 
-export async function exportDocx(doc: PMNode): Promise<Uint8Array> {
+/** 排版 token 的导出子集（来自 layout.ts exportTokens） */
+export interface ExportLayout {
+  fontFamily: string;
+  fontSize: number;
+  lineHeight: number;
+  paraGap: number;
+  indent: boolean;
+}
+
+/** CSS 字体列表取首个族名（docx 需要单一字体名） */
+export function primaryFont(css: string): string {
+  const m = css.split(",")[0]?.trim().replace(/^["']|["']$/g, "");
+  return m || "Microsoft YaHei";
+}
+
+export async function exportDocx(doc: PMNode, lt?: ExportLayout): Promise<Uint8Array> {
+  const sizeHalfPt = Math.round((lt?.fontSize ?? 17) * 2 * 0.75); // px→pt（×0.75）→ docx 半点
+  const lineTwips = Math.round((lt?.lineHeight ?? 1.9) * 240);
+  const font = lt ? primaryFont(lt.fontFamily) : undefined;
   const d = new Document({
-    sections: [{ children: buildDocx(doc.content ?? []) }],
+    styles: {
+      default: {
+        document: {
+          run: { font, size: sizeHalfPt },
+          paragraph: {
+            spacing: { line: lineTwips, after: Math.round((lt?.paraGap ?? 10) * 15) },
+            ...(lt?.indent
+              ? { indent: { firstLine: Math.round((lt.fontSize ?? 17) * 2 * 15) } }
+              : {}),
+          },
+        },
+      },
+    },
+    sections: [{ children: buildDocx(doc.content ?? [], lt) }],
   });
   const blob = await Packer.toBlob(d);
   return new Uint8Array(await blob.arrayBuffer());
@@ -263,15 +332,18 @@ function runsOf(nodes: PMNode[]): (TextRun | ExternalHyperlink)[] {
   return out;
 }
 
-function buildDocx(nodes: PMNode[]): (Paragraph | Table)[] {
+function buildDocx(nodes: PMNode[], lt?: ExportLayout): (Paragraph | Table)[] {
   const out: (Paragraph | Table)[] = [];
-  const pushListItems = (items: PMNode[], kind: "bullet" | "ordered" | "task", level: number) => {
+  // 首行缩进（FR-UI-03 排版型属性：DOCX 生效；2 字符 ≈ 字号×2）
+  const firstLine = lt?.indent ? { firstLine: Math.round((lt?.fontSize ?? 17) * 2 * 15) } : undefined;
+  const pushListItems = (items: PMNode[], kind: "bullet" | "ordered" | "task", level: number, listStart = 1) => {
     items.forEach((item, i) => {
       const paras = (item.content ?? []).filter((c) => c.type === "paragraph");
       const nested = (item.content ?? []).filter((c) =>
         ["bulletList", "orderedList", "taskList"].includes(c.type),
       );
-      let mark = kind === "bullet" ? "• " : kind === "ordered" ? `${i + 1}. ` : "";
+      // 有序列表尊重 start 属性（内容保真：5. 续前文 不得重排为 1.）
+      let mark = kind === "bullet" ? "• " : kind === "ordered" ? `${listStart + i}. ` : "";
       if (kind === "task") mark = item.attrs?.checked ? "☑ " : "☐ ";
       const indent = { left: 360 * (level + 1) };
       if (paras.length === 0 && nested.length === 0) {
@@ -281,6 +353,7 @@ function buildDocx(nodes: PMNode[]): (Paragraph | Table)[] {
         out.push(
           new Paragraph({
             indent,
+            ...(pi === 0 ? {} : (firstLine ?? {})),
             ...(kind === "bullet" ? { bullet: { level } } : {}),
             children: pi === 0 ? [new TextRun(mark), ...runsOf(p.content ?? [])] : runsOf(p.content ?? []),
           }),
@@ -291,6 +364,7 @@ function buildDocx(nodes: PMNode[]): (Paragraph | Table)[] {
           nl.content ?? [],
           nl.type === "orderedList" ? "ordered" : nl.type === "taskList" ? "task" : "bullet",
           level + 1,
+          nl.type === "orderedList" ? Number(nl.attrs?.start ?? 1) : 1,
         );
       }
     });
@@ -304,13 +378,13 @@ function buildDocx(nodes: PMNode[]): (Paragraph | Table)[] {
         break;
       }
       case "paragraph":
-        out.push(new Paragraph({ children: runsOf(n.content ?? []) }));
+        out.push(new Paragraph({ ...(firstLine ?? {}), children: runsOf(n.content ?? []) }));
         break;
       case "bulletList":
         pushListItems(n.content ?? [], "bullet", 0);
         break;
       case "orderedList":
-        pushListItems(n.content ?? [], "ordered", 0);
+        pushListItems(n.content ?? [], "ordered", 0, Number(n.attrs?.start ?? 1));
         break;
       case "taskList":
         pushListItems(n.content ?? [], "task", 0);
@@ -343,9 +417,21 @@ function buildDocx(nodes: PMNode[]): (Paragraph | Table)[] {
           const cells = (row.content ?? []).map(
             (cell) =>
               new TableCell({
-                children: (cell.content ?? []).map(
-                  (p) => new Paragraph({ children: runsOf(p.content ?? []) }),
-                ),
+                // 合并单元格与对齐透传（FR-EDT-09 / FR-UI-03：导出所见即所得）
+                ...(cell.attrs?.colspan ? { columnSpan: Number(cell.attrs.colspan) } : {}),
+                ...(cell.attrs?.rowspan ? { rowSpan: Number(cell.attrs.rowspan) } : {}),
+                children: (cell.content ?? []).map((p) => {
+                  const style = String(cell.attrs?.style ?? "");
+                  const alignment = /right/i.test(style)
+                    ? ("right" as const)
+                    : /center/i.test(style)
+                      ? ("center" as const)
+                      : undefined;
+                  return new Paragraph({
+                    ...(alignment ? { alignment } : {}),
+                    children: runsOf(p.content ?? []),
+                  });
+                }),
               }),
           );
           return new TableRow({ children: cells, tableHeader: ri === 0 });

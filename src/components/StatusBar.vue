@@ -1,24 +1,13 @@
 <script setup lang="ts">
-import { ref } from "vue";
+/** 状态栏：统计（含阅读时长/选区，FR-EDT-07）+ 同步指示 + 通知中心入口 + 主题/帮助 */
 import { openSyncHistory, s } from "../store";
+import { theme, setTheme } from "../theme";
+import { notifyCenter, openCenter } from "../notify";
 
-type ThemeMode = "light" | "dark" | "system";
-const mode = ref<ThemeMode>((localStorage.getItem("writer.theme") as ThemeMode) || "system");
+defineEmits<{ (e: "open-settings"): void; (e: "open-trash"): void; (e: "open-help"): void }>();
 
-function applyTheme() {
-  const dark =
-    mode.value === "dark" ||
-    (mode.value === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-}
-applyTheme();
-window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
-
-function cycle() {
-  mode.value = mode.value === "system" ? "light" : mode.value === "light" ? "dark" : "system";
-  localStorage.setItem("writer.theme", mode.value);
-  applyTheme();
-}
+// -- 统计（FR-EDT-07：400 字/分钟阅读时长；选区统计由 EditorPane 写入 s.counts.sel*） ---
+const readMin = () => Math.max(1, Math.round(s.counts.words / 400));
 
 // -- 同步指示（FR-SYN-03 状态可视化） ----------------------------------------
 const PHASE_LABEL: Record<string, string> = {
@@ -48,6 +37,10 @@ function toggleHistory() {
   if (s.sync.historyOpen) void openSyncHistory();
 }
 
+function cycleTheme() {
+  setTheme(theme.mode === "system" ? "light" : theme.mode === "light" ? "dark" : "system");
+}
+
 function fmtTime(unix: number) {
   return new Date(unix * 1000).toTimeString().slice(0, 5);
 }
@@ -67,6 +60,10 @@ const ACTION_LABEL: Record<string, string> = {
     <span class="sb-item">{{ s.counts.words }} 字</span>
     <span class="sb-item">{{ s.counts.chars }} 字符</span>
     <span class="sb-item">{{ s.counts.paragraphs }} 段</span>
+    <span class="sb-item dim" title="按 400 字/分钟估算">≈{{ readMin() }} 分钟</span>
+    <span v-if="s.counts.selWords" class="sb-item sel" title="选区统计">
+      选区 {{ s.counts.selWords }} 字 / {{ s.counts.selChars }} 字符
+    </span>
 
     <!-- 同步状态（点击展开历史/入口） -->
     <span
@@ -102,8 +99,18 @@ const ACTION_LABEL: Record<string, string> = {
 
     <span class="sb-grow" />
     <span v-if="s.root" class="sb-item dim" :title="s.root">{{ s.root }}</span>
-    <button class="icon-btn" :title="`主题：${mode}（点击切换）`" @click="cycle()">
-      {{ mode === "dark" ? "🌙" : mode === "light" ? "☀" : "◐" }}
+
+    <!-- 通知中心（FR-UI-06）：未读角标 -->
+    <button class="icon-btn" title="通知中心" @click="openCenter()">
+      🔔<span v-if="notifyCenter.unread" class="nc-badge">{{ notifyCenter.unread }}</span>
     </button>
+    <button
+      class="icon-btn"
+      :title="`主题：${theme.mode === 'light' ? '亮色' : theme.mode === 'dark' ? '暗色' : '跟随系统'}（点击切换）`"
+      @click="cycleTheme()"
+    >
+      {{ theme.systemDarkNow ? "🌙" : "☀" }}
+    </button>
+    <button class="icon-btn" title="帮助与快捷键（F1）" @click="$emit('open-help')">?</button>
   </footer>
 </template>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from "vue";
-import { ai, sendChat, insertReplyToBody, exportChatMd, defaultProvider } from "../aiflow";
+import { ai, sendChat, insertReplyToBody, exportChatMd, defaultProvider, loadConversation, popLastUserMessage } from "../aiflow";
+import { api } from "../api";
 import { s } from "../store";
 
 const input = ref("");
@@ -16,8 +17,8 @@ const CTX = [
 async function send() {
   const t = input.value.trim();
   if (!t) return;
-  input.value = "";
-  await sendChat(t);
+  const sent = await sendChat(t);
+  if (sent) input.value = ""; // 被隐私闸拦截时保留输入，用户可复制后自行处理
   await scrollBottom();
 }
 
@@ -31,10 +32,9 @@ watch(() => ai.chat.messages.length, scrollBottom);
 watch(
   () => s.current?.path,
   () => {
-    // 会话与文档绑定（FR-AI-04）：切文档即切会话
-    if (ai.chatOpen && s.current && ai.chat.docUuid !== (s.current.uuid ?? "")) {
-      ai.chat.docUuid = "";
-      void import("../aiflow").then((m) => m.openChat());
+    // 会话与文档绑定（FR-AI-04）：切文档即切会话（loadConversation 非 toggle 语义）
+    if (ai.chatOpen && s.current && ai.chat.docUuid !== (s.current.uuid || s.current.path)) {
+      void loadConversation();
     }
   },
 );
@@ -44,7 +44,11 @@ const showPaste = () => ai.chat.contextMode === "paste";
 function retryChat() {
   const msgs = ai.chat.messages;
   const lastUser = [...msgs].reverse().find((m) => m.role === "user");
-  if (lastUser) void sendChat(lastUser.content);
+  if (!lastUser) return;
+  popLastUserMessage(); // 移除末条未获回复的用户消息，重发不翻倍
+  // DB 侧同步回滚（重启后不翻倍）
+  void api.aiMessageDeleteLast(ai.chat.convId, "user").catch(() => undefined);
+  void sendChat(lastUser.content);
 }
 </script>
 
@@ -68,7 +72,7 @@ function retryChat() {
       ></textarea>
       <span class="cp-note">
         {{ defaultProvider()?.name ? `发送至 ${defaultProvider()!.name}` : "未配置 Provider" }}
-        <template v-if="s.current?.privacy">· ⚠ 隐私文档：文档上下文将被拦截</template>
+        <template v-if="s.current?.privacy">· ⚠ 隐私文档：讨论已被整体拦截</template>
       </span>
     </div>
     <div ref="listEl" class="cp-list">

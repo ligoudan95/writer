@@ -38,3 +38,4 @@ src-tauri/gen/schemas/
 # 开发过程中的分析截图（不进库）
 .*.png
 
+src-tauri/LICENSES/

@@ -3,6 +3,27 @@ import { reactive, ref, watch, computed, onMounted, onBeforeUnmount } from "vue"
 import { Editor, EditorContent } from "@tiptap/vue-3";
 import StarterKit from "@tiptap/starter-kit";
 import { Table, TableRow, TableHeader, TableCell } from "@tiptap/extension-table";
+import { ImageNode } from "../image-node";
+
+// 表格节点扩展：列对齐（表级 align + 单元格 style）必须入 schema，
+// 否则 setContent 时未知属性被丢弃、往返丢对齐（FR-EDT-01 方言 / FR-EDT-09 合并）
+const TableWithAlign = Table.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      align: { default: null, renderHTML: () => ({}), parseHTML: () => null },
+    };
+  },
+});
+const styledCell = (Base: typeof TableCell | typeof TableHeader) =>
+  Base.extend({
+    addAttributes() {
+      return {
+        ...this.parent?.(),
+        style: { default: null },
+      };
+    },
+  });
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import {
@@ -19,6 +40,8 @@ import {
   manualSnapshot,
   previewSnapshot,
   restoreSnapshot,
+  saveSession,
+  consumePendingSessionPos,
 } from "../store";
 import { mdToDoc, docToMd, type PMNode } from "../codec";
 import { AiDraft } from "../aidraft-mark";
@@ -36,6 +59,9 @@ import {
   openChat,
 } from "../aiflow";
 import { api } from "../api";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { confirm as dialogConfirm } from "@tauri-apps/plugin-dialog";
+import { markTyping } from "../notify";
 import PolishPanel from "./PolishPanel.vue";
 import ExportPanel from "./ExportPanel.vue";
 
@@ -49,22 +75,29 @@ const LEVELS: HeadingLevel[] = [1, 2, 3, 4, 5, 6];
 const editor = new Editor({
   content: { type: "doc", content: [{ type: "paragraph" }] },
   extensions: [
-    StarterKit.configure({ link: { openOnClick: false, autolink: true } }),
+    StarterKit.configure({
+      link: { openOnClick: false, autolink: true },
+      // 撤销栈上限（FR-EDT-03 v1.7.1：500 步，淘汰区段由快照兜底）
+      undoRedo: { depth: 500 },
+    }),
     TaskList,
     TaskItem.configure({ nested: true }),
-    Table.configure({ resizable: false }),
+    TableWithAlign.configure({ resizable: false }),
     TableRow,
-    TableHeader,
-    TableCell,
+    styledCell(TableHeader),
+    styledCell(TableCell),
+    ImageNode,
     AiDraft,
   ],
   editorProps: {
     handleKeyDown(_view, event) {
-      // AI 续写草稿态（FR-AI-03）：Tab 接受 / Esc 放弃（优先于缩进）
+      // AI 续写草稿态（FR-AI-03）：Tab 接受 / Esc 放弃（优先于缩进）；
+      // 收起态 Tab = 取回（不能对已移除的区间走 accept，否则草稿文本静默丢失）
       if (ai.cont.state === "draft") {
         if (event.key === "Tab" && !event.ctrlKey && !event.metaKey && !event.altKey) {
           event.preventDefault();
-          acceptContinue();
+          if (ai.cont.collapsed) restoreCollapsedDraft();
+          else acceptContinue();
           return true;
         }
         if (event.key === "Escape") {
@@ -77,8 +110,8 @@ const editor = new Editor({
         restoreCollapsedDraft();
         return true;
       }
-      // 润色处理中：选区内任意按键 → 取消请求并立即解锁（不吞输入，FR-AI-02）
-      if (ai.polish.state === "running" && event.key.length === 1) {
+      // 润色处理中：任意按键 → 取消请求并立即解锁（不吞输入，FR-AI-02）
+      if (ai.polish.state === "running") {
         cancelRunning("polish");
         return false;
       }
@@ -116,9 +149,22 @@ const editor = new Editor({
       }
       return false;
     },
+    // FR-EDT-02：Ctrl+点击链接 → 系统默认浏览器打开（首次外发确认一次）
+    handleClick(_view, pos, event) {
+      const me = event as MouseEvent;
+      if (!(me.ctrlKey || me.metaKey)) return false;
+      const link = editor.state.doc.resolve(pos).marks().find((m) => m.type.name === "link");
+      const href = link?.attrs.href;
+      if (typeof href === "string" && href) {
+        void openExternalLink(href);
+        return true;
+      }
+      return false;
+    },
   },
   onUpdate: () => {
     if (aiSuppressSave) return; // 草稿操作期间抑制自动保存
+    markTyping(); // 输入保护（FR-UI-06）：通知中心据此延后非紧急通知
     // 用户在草稿插入点之前输入 → 草稿收起为"待插入"（FR-AI-03）
     maybeCollapseDraft(editor.state.selection.head);
     scheduleSave();
@@ -131,9 +177,10 @@ let aiSuppressSave = false;
 
 function deepMark(nodes: PMNode["content"]): PMNode["content"] {
   const mark = { type: "aiDraft" } as never;
+  // text 与 image（等无 text 的行内节点）都加 mark：纯图片草稿段也必须能被 strip
   const walk = (n: PMNode): PMNode => ({
     ...n,
-    marks: n.text ? [...(n.marks ?? []), mark as never] : n.marks,
+    marks: n.text || n.type === "image" ? [...(n.marks ?? []), mark as never] : n.marks,
     content: n.content ? n.content.map(walk) : undefined,
   });
   return nodes?.map(walk);
@@ -142,6 +189,23 @@ function deepMark(nodes: PMNode["content"]): PMNode["content"] {
 function nodesOf(md: string): PMNode["content"] {
   const doc = mdToDoc(md) as PMNode;
   return (doc.content ?? []) as PMNode["content"];
+}
+
+/** 深拷贝并剔除 AI 草稿块：草稿经 insertContent 以整块插入（段落级），
+ * 段落内任何 aiDraft mark 即整段为草稿（含其中的 image——mark 只加在 text 上），
+ * 未接受前不得进入保存/导出/上下文 */
+function stripDraftNodes(json: PMNode): PMNode {
+  const hasDraftMark = (n: PMNode): boolean =>
+    !!n.marks?.some((m) => m.type === "aiDraft") || !!(n.content ?? []).some(hasDraftMark);
+  const walk = (n: PMNode): PMNode | null => {
+    if ((n.type === "paragraph" || n.type === "heading") && hasDraftMark(n)) return null;
+    if (n.type === "text" && n.marks?.some((m) => m.type === "aiDraft")) return null;
+    if (!n.content) return n;
+    const content = n.content.map(walk).filter((x): x is PMNode => !!x);
+    return { ...n, content };
+  };
+  const content = (json.content ?? []).map(walk).filter((x): x is PMNode => !!x);
+  return { ...json, content };
 }
 
 setAiEditor({
@@ -153,11 +217,15 @@ setAiEditor({
     return { from, to, text: md };
   },
   replaceRangeWithMd: (from, to, md) => {
-    editor
-      .chain()
-      .focus()
-      .insertContentAt({ from, to }, nodesOf(md) as never, { updateSelection: true })
-      .run();
+    try {
+      editor
+        .chain()
+        .focus()
+        .insertContentAt({ from, to }, nodesOf(md) as never, { updateSelection: true })
+        .run();
+    } catch {
+      // 润色区间失效（文档已变）：放弃应用，调用方仍会收尾面板状态
+    }
   },
   insertDraft: (md) => {
     try {
@@ -168,6 +236,8 @@ setAiEditor({
         .insertContentAt(anchor, deepMark(nodesOf(md)) as never)
         .run();
       return { from: anchor, to: editor.state.selection.to };
+    } catch {
+      return null; // 区间失效（内容已被替换）：调用方按 null 容错
     } finally {
       aiSuppressSave = false;
     }
@@ -180,6 +250,8 @@ setAiEditor({
         .insertContentAt({ from, to }, deepMark(nodesOf(md)) as never)
         .run();
       return { from, to: editor.state.selection.to };
+    } catch {
+      return null;
     } finally {
       aiSuppressSave = false;
     }
@@ -194,6 +266,8 @@ setAiEditor({
           return true;
         })
         .run();
+    } catch {
+      // 区间失效：接受操作退化为无操作（草稿文本随编辑器状态已不存在）
     } finally {
       aiSuppressSave = false;
     }
@@ -202,6 +276,8 @@ setAiEditor({
     try {
       aiSuppressSave = true;
       editor.chain().deleteRange({ from, to }).run();
+    } catch {
+      // 区间失效：草稿已不存在
     } finally {
       aiSuppressSave = false;
     }
@@ -235,10 +311,11 @@ setAiEditor({
     aiSuppressSave = on;
   },
 });
-bindAiDocJson(() => editor.getJSON() as unknown as PMNode);
+bindAiDocJson(() => stripDraftNodes(editor.getJSON() as unknown as PMNode));
 
 onMounted(() => {
-  bindEditor(() => editor.getJSON() as unknown as PMNode);
+  // 保存/导出/上下文取 DocModel 时剔除未接受的 AI 草稿文本（mark 白名单只剥 mark 不剥文字）
+  bindEditor(() => stripDraftNodes(editor.getJSON() as unknown as PMNode));
   // 位置桥：远端更新重载时保持光标与滚动（FR-SYN-09 / A15）
   const scroller = () => document.querySelector(".editor-scroll");
   bindEditorPos(
@@ -261,13 +338,26 @@ onMounted(() => {
       });
     },
   );
+  editorGetPosRef = () => {
+    try {
+      return {
+        head: editor.state.selection.head,
+        scrollTop: scroller()?.scrollTop ?? 0,
+      };
+    } catch {
+      return null;
+    }
+  };
   if (s.current) applyContent();
   else updateCounts({ type: "doc", content: [] });
   editor.on("transaction", syncToolbarState);
+  editor.on("transaction", updateSelectionCounts);
 });
 
 onBeforeUnmount(() => {
   editor.off("transaction", syncToolbarState);
+  editor.off("transaction", updateSelectionCounts);
+  window.clearInterval(sessionTimer);
   editor.destroy();
 });
 
@@ -275,6 +365,70 @@ function applyContent() {
   if (!s.current) return;
   editor.commands.setContent(mdToDoc(s.current.body) as never, { emitUpdate: false });
   updateCounts(editor.getJSON() as unknown as PMNode);
+  // 会话恢复（FR-UI-04）：打开后一次性恢复上次光标与滚动
+  const pos = consumePendingSessionPos(s.current.path);
+  if (pos) {
+    const size = editor.state.doc.content.size;
+    editor.commands.setTextSelection(Math.min(Math.max(pos.head, 0), size));
+    requestAnimationFrame(() => {
+      document.querySelector(".editor-scroll")?.scrollTo({ top: pos.scrollTop });
+    });
+  }
+}
+
+/** 选区统计（FR-EDT-07）：选区变化时刷新状态栏选区字数。
+ * 记忆化 (from,to,doc 内容版本)：键盘自动重复/带选区格式化不重复做 O(选区长) 扫描 */
+let lastSelKey = "";
+function updateSelectionCounts() {
+  const { from, to, empty } = editor.state.selection;
+  const key = empty ? "-" : `${from}:${to}:${editor.state.doc.content.size}`;
+  if (key === lastSelKey) return;
+  lastSelKey = key;
+  if (empty) {
+    if (s.counts.selWords || s.counts.selChars) {
+      s.counts.selWords = 0;
+      s.counts.selChars = 0;
+    }
+    return;
+  }
+  const text = editor.state.doc.textBetween(from, to, "\n");
+  const words = (text.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]|[A-Za-z0-9]+/gu) ?? []).length;
+  s.counts.selWords = words;
+  s.counts.selChars = text.replace(/\n/g, "").length;
+}
+
+/** 会话位置持久化（FR-UI-04）：每 5 秒与光标移动后的去抖时刻 */
+const sessionTimer = window.setInterval(() => {
+  const pos = editorGetPosRef();
+  saveSession(pos);
+}, 5000);
+
+let editorGetPosRef: () => { head: number; scrollTop: number } | null = () => null;
+
+/** FR-EDT-02：外部链接打开（系统默认浏览器）；首次外发确认一次，确认后本机不再询问 */
+async function openExternalLink(href: string) {
+  if (!/^https?:\/\//i.test(href)) {
+    s.toast = { msg: "仅支持打开 http/https 链接" };
+    setTimeout(() => {
+      if (s.toast?.msg === "仅支持打开 http/https 链接") s.toast = null;
+    }, 3000);
+    return;
+  }
+  if (localStorage.getItem("writer.extlink.ok") !== "1") {
+    const ok = await dialogConfirm(`即将在系统默认浏览器打开外部链接：\n${href}\n\n允许？（仅首次询问）`, {
+      title: "打开外部链接",
+    });
+    if (!ok) return;
+    localStorage.setItem("writer.extlink.ok", "1");
+  }
+  try {
+    await openUrl(href);
+  } catch {
+    s.toast = { msg: "打开链接失败" };
+    setTimeout(() => {
+      if (s.toast?.msg === "打开链接失败") s.toast = null;
+    }, 3000);
+  }
 }
 
 /** Shift+Tab：移除当前段行首的缩进（全角空格/半角空格各按字符计） */
@@ -559,6 +713,13 @@ watch(
         <button class="tool" @click="c().deleteColumn().run()">删列</button>
         <span class="sep" />
         <button class="tool" @click="c().toggleHeaderRow().run()">表头</button>
+        <button
+          class="tool"
+          title="选中多个单元格合并；光标在合并单元格内则拆分（HTML 表格方言承载）"
+          @click="c().mergeOrSplit().run()"
+        >
+          合并/拆分
+        </button>
         <button class="tool danger" @click="c().deleteTable().run()">删除表格</button>
       </div>
 

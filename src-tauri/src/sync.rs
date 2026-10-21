@@ -90,6 +90,17 @@ pub struct Tombstone {
     pub path: String,
     #[serde(rename = "deletedAt", default)]
     pub deleted_at: u64,
+    /// 复活时间（回收站还原后重上传时标记）：restored_at > deleted_at 表示
+    /// 墓碑已失效——并集合并会把对端仍持有的墓碑合回来，单靠 remove 无法跨设备收敛
+    #[serde(rename = "restoredAt", default)]
+    pub restored_at: u64,
+}
+
+impl Tombstone {
+    /// 墓碑是否仍生效（未被复活，或复活后又被删除）
+    pub fn active(&self) -> bool {
+        self.deleted_at > self.restored_at
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -108,14 +119,23 @@ impl TombstoneManifest {
         self.tombstones.iter().find(|t| t.uuid == uuid)
     }
 
-    /// 集合并集：uuid 求并，同 uuid 取更晚删除时间（FR-SYN-08 应用独占清单规则）
+    /// 生效墓碑查询（复活后的条目不算删除标记）
+    pub fn is_tombstoned(&self, uuid: &str) -> bool {
+        self.get(uuid).is_some_and(|t| t.active())
+    }
+
+    /// 集合并集：uuid 求并，同 uuid 取更晚删除/复活时间（FR-SYN-08 应用独占清单规则）
     pub fn merge(&mut self, other: &TombstoneManifest) -> bool {
         let mut changed = false;
         for t in &other.tombstones {
             match self.tombstones.iter_mut().find(|x| x.uuid == t.uuid) {
                 Some(slot) => {
-                    if t.deleted_at > slot.deleted_at {
-                        *slot = t.clone();
+                    if t.deleted_at > slot.deleted_at || t.restored_at > slot.restored_at {
+                        slot.deleted_at = slot.deleted_at.max(t.deleted_at);
+                        slot.restored_at = slot.restored_at.max(t.restored_at);
+                        if t.deleted_at >= slot.deleted_at {
+                            slot.path = t.path.clone();
+                        }
                         changed = true;
                     }
                 }
@@ -140,11 +160,23 @@ impl TombstoneManifest {
                 uuid: uuid.to_string(),
                 path: path.to_string(),
                 deleted_at,
+                restored_at: 0,
             }),
         }
     }
 
-    /// GC：仅清理超过 1 年且状态可确认的记录（无法确认时延后——保守）
+    /// 标记复活（回收站还原后重上传）：墓碑失效并随结算传播到对端。
+    /// 再次删除走 upsert（deleted_at 更新后重新生效）
+    pub fn mark_restored(&mut self, uuid: &str, now: u64) {
+        if let Some(slot) = self.tombstones.iter_mut().find(|x| x.uuid == uuid) {
+            if now > slot.restored_at {
+                slot.restored_at = now;
+            }
+        }
+    }
+
+    /// GC：仅清理超过 1 年的记录（保守；无法确认同步完成态时延后；
+    /// 复活标记随条目一起保留，直至按 deleted_at 老化淘汰）
     pub fn gc(&mut self, now: u64) -> usize {
         let before = self.tombstones.len();
         self.tombstones
@@ -246,10 +278,16 @@ impl SyncDb {
     }
 
     /// 已写入墓碑清单的记录（防重复追加，FR-SYN-08）
-    pub fn tombstone_sent(&self, uuid: &str) -> bool {
-        self.conn
-            .query_row("SELECT 1 FROM tombstone_sent WHERE uuid=?1", [uuid], |_| Ok(()))
-            .is_ok()
+    /// 是否已处理过"这一代"删除：仅旧代（复活前）的记录不算——复活后再次删除需重新传播
+    pub fn tombstone_sent(&self, uuid: &str, deleted_at: u64) -> bool {
+        match self.conn.query_row(
+            "SELECT deleted_at FROM tombstone_sent WHERE uuid=?1",
+            [uuid],
+            |r| r.get::<_, i64>(0),
+        ) {
+            Ok(at) => (at as u64) >= deleted_at,
+            Err(_) => false,
+        }
     }
 
     pub fn mark_tombstone_sent(&self, uuid: &str, deleted_at: u64) {
@@ -316,6 +354,42 @@ struct LocalDoc {
 struct LocalAttachment {
     rel: String, // attachments/…
     hash: String,
+}
+
+/// 诊断包用的库结构统计（backup.rs 消费；只读计数，无隐私内容外泄）
+pub struct LibrarySummary {
+    pub docs: usize,
+    pub attachments: usize,
+    pub docs_missing_id: usize,
+}
+
+pub fn library_summary(root: &Path) -> LibrarySummary {
+    let files = {
+        let mut out = Vec::new();
+        walk_files(&root.join("docs"), "docs", &mut out);
+        out
+    };
+    let mut docs = 0usize;
+    let mut missing_id = 0usize;
+    for rel in files {
+        if !rel.to_lowercase().ends_with(".md") {
+            continue;
+        }
+        docs += 1;
+        if let Ok(bytes) = fs::read(root.join(&rel)) {
+            let (fm, _) = frontmatter::split(&String::from_utf8_lossy(&bytes));
+            if fm.as_ref().and_then(|f| f.get("id")).unwrap_or("").is_empty() {
+                missing_id += 1;
+            }
+        }
+    }
+    let mut att_files = Vec::new();
+    walk_files(&root.join("attachments"), "attachments", &mut att_files);
+    LibrarySummary {
+        docs,
+        attachments: att_files.len(),
+        docs_missing_id: missing_id,
+    }
 }
 
 fn walk_files(dir: &Path, prefix: &str, out: &mut Vec<String>) {
@@ -569,12 +643,17 @@ impl<'a> SyncEngine<'a> {
             );
             self.propagate_renames(&docs, &mut remote_files, &state_by_uuid)?;
             self.propagate_local_deletes(&docs, &mut remote_files, &state_rows, &mut manifest)?;
-            self.sync_docs(&docs, &remote_files, &state_by_uuid, &manifest, &trashed)?;
+            self.sync_docs(&docs, &remote_files, &state_by_uuid, &mut manifest, &trashed)?;
             self.sync_attachments(&atts, &remote_files);
         }
 
         // -- 结算：清单落盘与上传 -------------------------------------------
         self.phase("settling");
+        // GC 必须在清单序列化之前执行——结算后仅改内存不落盘，清理永不生效
+        let gc_removed = manifest.gc(self.now);
+        if gc_removed > 0 {
+            self.warn("墓碑清单已执行年度清理");
+        }
         let local_manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap_or_default();
         let manifest_disk = self.lib.root.join(MANIFEST_SYNC);
         let manifest_on_disk = fs::read(&manifest_disk).unwrap_or_default();
@@ -595,16 +674,12 @@ impl<'a> SyncEngine<'a> {
         // 统计清单（应用独占）：远端有则并集收编（V1 无写入方，仅保持收敛）
         self.settle_stats_manifest(&remote_files)?;
 
-        // 首次绑定完成后落 bound 标记
+        // 首次绑定完成后落 bound 标记——重读当前配置仅合并 bound：
+        // 批次运行中用户改 url/关同步时，不能用启动时的配置快照整体覆写
         if !self.settings.bound {
-            let mut s = self.settings.clone();
+            let mut s = load_settings(&self.lib.root);
             s.bound = true;
             save_settings(&self.lib.root, &s)?;
-        }
-
-        // 墓碑 GC（1 年 + 保守）
-        if manifest.gc(self.now) > 0 {
-            self.warn("墓碑清单已执行年度清理");
         }
 
         self.phase("idle");
@@ -633,30 +708,60 @@ impl<'a> SyncEngine<'a> {
                 self.warn("首次绑定：以上传本地为方向");
                 let mut uploaded: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for d in docs {
-                    let bytes = fs::read(self.lib.root.join(&d.rel)).unwrap_or_default();
-                    let etag = self.backend.put(&d.rel, &bytes)?;
+                    let mut uuid = d.uuid.clone();
+                    let rel = d.rel.clone();
+                    let mut bytes = fs::read(self.lib.root.join(&d.rel)).unwrap_or_default();
+                    // 外部放置（无 id）文件先补写 uuid 再上传：
+                    // 空 uuid 作主键会让多行互相覆盖，删除时还会生成空 uuid 墓碑误伤对端
+                    if uuid.is_empty() {
+                        let content = String::from_utf8_lossy(&bytes).to_string();
+                        let (fm_opt, body) = frontmatter::split(&content);
+                        let mut fm = fm_opt.unwrap_or_default();
+                        uuid = uuid_new();
+                        fm.set("id", &uuid);
+                        if fm.get("fmt").is_none() {
+                            fm.set("fmt", "1");
+                        }
+                        let full = format!("{}\n{}", fm.render(), body);
+                        bytes = full.into_bytes();
+                        {
+                            let _g = self.lib.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                            atomic_write(&self.lib.root.join(&rel), &bytes)?;
+                        }
+                        self.warn(format!("外部文件已分配 uuid 并上传：{rel}"));
+                    }
+                    let etag = self.backend.put(&rel, &bytes)?;
                     self.report.uploaded += 1;
                     self.report.bytes_up += bytes.len() as u64;
-                    uploaded.insert(d.rel.clone());
+                    uploaded.insert(rel.clone());
                     self.db.upsert(&SyncStateRow {
-                        doc_uuid: d.uuid.clone(),
-                        file_path: d.rel.clone(),
-                        local_hash: d.hash.clone(),
-                        synced_hash: d.hash.clone(),
+                        doc_uuid: uuid,
+                        file_path: rel.clone(),
+                        local_hash: hash_hex(&bytes),
+                        synced_hash: hash_hex(&bytes),
                         remote_etag: etag,
                         synced_at: self.now,
                     });
-                    self.progress(&d.rel, "upload", bytes.len() as u64);
-                    self.log(&d.rel, "up", bytes.len() as u64, "put", "ok");
+                    self.progress(&rel, "upload", bytes.len() as u64);
+                    self.log(&rel, "up", bytes.len() as u64, "put", "ok");
                 }
                 for a in atts {
                     let bytes = fs::read(self.lib.root.join(&a.rel)).unwrap_or_default();
-                    self.backend.put(&a.rel, &bytes)?;
+                    let etag = self.backend.put(&a.rel, &bytes)?;
                     self.report.uploaded += 1;
                     self.report.bytes_up += bytes.len() as u64;
                     uploaded.insert(a.rel.clone());
                     self.progress(&a.rel, "upload", bytes.len() as u64);
                     self.log(&a.rel, "up", bytes.len() as u64, "put", "ok");
+                    // 与文档同套状态行语义：否则首轮 bound 会因无记录而全量重传附件
+                    self.db.upsert(&SyncStateRow {
+                        doc_uuid: format!("attachment:{}", a.rel),
+                        file_path: a.rel.clone(),
+                        local_hash: hash_hex(&bytes),
+                        synced_hash: hash_hex(&bytes),
+                        remote_etag: etag,
+                        synced_at: self.now,
+                    });
                 }
                 // "上传本地覆盖远端"：清理远端多余文件（镜像语义）
                 for rp in remote_files.keys() {
@@ -708,12 +813,25 @@ impl<'a> SyncEngine<'a> {
                         self.progress(&rel, "download", after.len() as u64);
                         self.log(&rel, "down", after.len() as u64, "get", "ok");
                     } else if path.starts_with("attachments/") {
+                        if Self::safe_rel(path).is_err() {
+                            self.warn(format!("跳过非法远端附件路径：{path}"));
+                            continue;
+                        }
                         let dest = self.lib.root.join(path);
                         if let Some(parent) = dest.parent() {
                             let _g = self.lib.write_lock.lock().unwrap_or_else(|e| e.into_inner());
                             let _ = fs::create_dir_all(parent);
                             atomic_write(&dest, &bytes)?;
                         }
+                        // 落状态行（与 Upload 方向对称）：否则首轮 bound 会因无记录全量重传
+                        self.db.upsert(&SyncStateRow {
+                            doc_uuid: format!("attachment:{path}"),
+                            file_path: path.clone(),
+                            local_hash: hash_hex(&bytes),
+                            synced_hash: hash_hex(&bytes),
+                            remote_etag: entry.etag.clone(),
+                            synced_at: self.now,
+                        });
                         self.report.downloaded += 1;
                         self.progress(path, "download", bytes.len() as u64);
                         self.log(path, "down", bytes.len() as u64, "get", "ok");
@@ -745,8 +863,12 @@ impl<'a> SyncEngine<'a> {
     ) -> std::collections::HashSet<String> {
         let mut trashed = std::collections::HashSet::new();
         for t in &manifest.tombstones {
+            // 已复活的墓碑不传播删除（回收站还原场景，防删除循环）
+            if !t.active() {
+                continue;
+            }
             // 本端已处理过该删除（防回收站恢复后再次误删）
-            if self.db.tombstone_sent(&t.uuid) {
+            if self.db.tombstone_sent(&t.uuid, t.deleted_at) {
                 continue;
             }
             if let Some(doc) = local_by_uuid.get(&t.uuid) {
@@ -799,12 +921,14 @@ impl<'a> SyncEngine<'a> {
                 continue;
             }
             // 已知 uuid 的旧路径消失 + 新路径出现同一 uuid → 远端 MOVE
+            let mut mv_ok = false;
             if let Some(old_entry) = remote_files.get(&row.file_path).cloned() {
                 match self.backend.mv(&row.file_path, &d.rel) {
                     Ok(()) => {
                         // 视图同步更新：新路径持有旧 etag（MOVE 不改内容）
                         remote_files.remove(&row.file_path);
                         remote_files.insert(d.rel.clone(), old_entry);
+                        mv_ok = true;
                         self.report.moved += 1;
                         self.log(&d.rel, "up", 0, "move", "ok");
                         (self.emit)(
@@ -815,10 +939,13 @@ impl<'a> SyncEngine<'a> {
                     Err(e) => self.warn(format!("MOVE {} → {} 失败：{}", row.file_path, d.rel, e.message)),
                 }
             }
-            // 状态行路径对齐（内容差异由 sync_docs 处理）
-            let mut new_row = row.clone();
-            new_row.file_path = d.rel.clone();
-            self.db.upsert(&new_row);
+            // 状态行路径对齐（内容差异由 sync_docs 处理）。
+            // MOVE 失败时保持旧路径：提前提交新路径会让远端残留新旧两份并引发振荡
+            if mv_ok || remote_files.contains_key(&d.rel) {
+                let mut new_row = row.clone();
+                new_row.file_path = d.rel.clone();
+                self.db.upsert(&new_row);
+            }
         }
         Ok(())
     }
@@ -838,14 +965,19 @@ impl<'a> SyncEngine<'a> {
             docs.iter().map(|d| d.rel.as_str()).collect();
 
         for row in state_rows {
+            // 附件状态行（attachment: 前缀）不参与文档删除传播，否则会被误判为
+            // "本端已删除"而删除远端附件
+            if row.doc_uuid.starts_with("attachment:") {
+                continue;
+            }
             if local_uuids.contains(row.doc_uuid.as_str()) || local_paths.contains(row.file_path.as_str()) {
                 continue;
             }
-            // 本端已删除：写墓碑（防重复）+ 远端删除 + 清状态
-            if !self.db.tombstone_sent(&row.doc_uuid) {
-                manifest.upsert(&row.doc_uuid, &row.file_path, self.now);
-                self.db.mark_tombstone_sent(&row.doc_uuid, self.now);
-            }
+            // 本端已删除：写墓碑 + 远端删除 + 清状态。
+            // upsert 无条件执行（幂等且保序）：复活后再删除时 deleted_at 更新、
+            // 墓碑重新生效——按代数跳过会让墓碑停留在失活态，削弱删除传播
+            manifest.upsert(&row.doc_uuid, &row.file_path, self.now);
+            self.db.mark_tombstone_sent(&row.doc_uuid, self.now);
             if remote_files.remove(&row.file_path).is_some() {
                 if let Err(e) = self.backend.delete(&row.file_path) {
                     self.warn(format!("远端删除 {} 失败：{}", row.file_path, e.message));
@@ -868,11 +1000,19 @@ impl<'a> SyncEngine<'a> {
         docs: &[LocalDoc],
         remote_files: &BTreeMap<String, RemoteEntry>,
         state_by_uuid: &BTreeMap<String, SyncStateRow>,
-        manifest: &TombstoneManifest,
+        manifest: &mut TombstoneManifest,
         trashed_this_run: &std::collections::HashSet<String>,
     ) -> Result<(), AppError> {
         // 远端 uuid 索引：仅对"无法按路径对位"的远端文件下载探查
         let mut handled_remote: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // 远端独有文件探测缓存（rpath → (uuid, bytes)）：改名跟随判定与
+        // "远端删除"区分共用；字节保留供主循环复用，避免同一文件下载两遍
+        let mut remote_probe: std::collections::HashMap<String, (String, Vec<u8>)> =
+            std::collections::HashMap::new();
+        let state_by_path: BTreeMap<String, SyncStateRow> =
+            self.db.all().into_iter().map(|r| (r.file_path.clone(), r)).collect();
+        let local_uuids: std::collections::HashSet<String> =
+            docs.iter().map(|d| d.uuid.clone()).collect();
 
         // 1) 本地文档：上传 / MOVE 后补传 / 冲突（墓碑清理过的文件本轮跳过）
         for d in docs {
@@ -883,13 +1023,10 @@ impl<'a> SyncEngine<'a> {
                 continue;
             }
             let row = state_by_uuid.get(&d.uuid);
-            self.sync_one_doc(d, row, remote_files, manifest, &mut handled_remote)?;
+            self.sync_one_doc(d, row, remote_files, manifest, &mut handled_remote, &state_by_path, &mut remote_probe)?;
         }
 
         // 2) 远端独有文件：新建下载 / 远端改名 / 墓碑清理
-        let state_by_path: BTreeMap<String, SyncStateRow> = self.db.all().into_iter().map(|r| (r.file_path.clone(), r)).collect();
-        let local_uuids: std::collections::HashSet<String> =
-            docs.iter().map(|d| d.uuid.clone()).collect();
         for (rpath, entry) in remote_files {
             if !rpath.starts_with("docs/") || !rpath.ends_with(".md") || rpath == MANIFEST_SYNC || rpath == MANIFEST_STATS {
                 continue;
@@ -897,9 +1034,15 @@ impl<'a> SyncEngine<'a> {
             if handled_remote.contains(rpath) || state_by_path.contains_key(rpath) {
                 continue;
             }
-            // 未知远端文档：下载探查
-            let bytes = self.backend.get(rpath)?;
-            self.report.bytes_down += bytes.len() as u64;
+            // 未知远端文档：下载探查（优先复用探测缓存，避免同一文件下载两遍）
+            let bytes = match remote_probe.remove(rpath) {
+                Some((_, b)) => b,
+                None => {
+                    let b = self.backend.get(rpath)?;
+                    self.report.bytes_down += b.len() as u64;
+                    b
+                }
+            };
             let content = String::from_utf8_lossy(&bytes).to_string();
             let (uuid, _) = parse_uuid_title(&content);
             if uuid.is_empty() {
@@ -926,7 +1069,7 @@ impl<'a> SyncEngine<'a> {
                 self.warn(format!("远端文件无 id，已按新文档导入：{rpath}"));
                 continue;
             }
-            if manifest.get(&uuid).is_some() {
+            if manifest.is_tombstoned(&uuid) {
                 // 墓碑内：本端曾删除，远端残留 → 补删（A11 不复活）
                 self.backend.delete(rpath)?;
                 self.report.deleted_remote += 1;
@@ -972,18 +1115,33 @@ impl<'a> SyncEngine<'a> {
                     );
                     continue;
                 }
-                // 本地未分叉：远端改名，本地文件对齐远端路径
+                // 本地未分叉：远端改名，本地文件对齐远端路径。
+                // 改名方重写过 frontmatter title（内容已变）：跟随方必须同时采纳远端
+                // 内容，否则新 etag 配旧 synced_hash 会把差异"封死"，标题永不收敛
                 let new_rel = self.rename_local_doc(&local_doc.rel, rpath)?;
-                let row = state_by_uuid.get(&uuid).cloned().unwrap_or_default();
-                let hash = local_doc.hash.clone();
+                let same_content = local_doc.hash == hash_hex(&bytes);
+                let (final_hash, synced_hash) = if same_content {
+                    (local_doc.hash.clone(), local_doc.hash.clone())
+                } else {
+                    self.write_local_doc(&new_rel, &bytes)?;
+                    let h = hash_hex(&bytes);
+                    (h.clone(), h)
+                };
                 self.db.upsert(&SyncStateRow {
                     doc_uuid: uuid.clone(),
                     file_path: new_rel.clone(),
-                    local_hash: hash.clone(),
-                    synced_hash: row.synced_hash.clone(),
+                    local_hash: final_hash.clone(),
+                    synced_hash,
                     remote_etag: entry.etag.clone(),
                     synced_at: self.now,
                 });
+                if !same_content {
+                    self.report.downloaded += 1;
+                    (self.emit)(
+                        "doc:external_change",
+                        serde_json::json!({ "path": new_rel, "hash": final_hash }),
+                    );
+                }
                 (self.emit)(
                     "doc:renamed",
                     serde_json::json!({ "from": local_doc.rel, "to": new_rel }),
@@ -1012,19 +1170,89 @@ impl<'a> SyncEngine<'a> {
         Ok(())
     }
 
+    /// 在远端独有文件中探测 uuid 是否仍存在（"远端改名"与"远端删除"的区分依据）。
+    /// 结果缓存（含字节）：多个文档同时消失时不重复下载，主循环复用同一份数据
+    fn probe_remote_uuid(
+        &mut self,
+        d: &LocalDoc,
+        remote_files: &BTreeMap<String, RemoteEntry>,
+        state_by_path: &BTreeMap<String, SyncStateRow>,
+        handled_remote: &std::collections::HashSet<String>,
+        cache: &mut std::collections::HashMap<String, (String, Vec<u8>)>,
+    ) -> Option<String> {
+        for rpath in remote_files.keys() {
+            if !rpath.starts_with("docs/")
+                || !rpath.ends_with(".md")
+                || rpath == MANIFEST_SYNC
+                || rpath == MANIFEST_STATS
+                || rpath == &d.rel
+                || handled_remote.contains(rpath.as_str())
+                || state_by_path.contains_key(rpath.as_str())
+            {
+                continue;
+            }
+            if !cache.contains_key(rpath.as_str()) {
+                // 失败不入缓存：空字节若被缓存，主循环会把它当"无 id 外部文件"
+                // 建空文档回传远端，覆盖远端原内容——瞬时网络错误不致命化
+                if let Ok(b) = self.backend.get(rpath) {
+                    self.report.bytes_down += b.len() as u64;
+                    let u = parse_uuid_title(&String::from_utf8_lossy(&b)).0;
+                    cache.insert(rpath.clone(), (u, b));
+                } else {
+                    continue; // 本候选探测失败，跳过（不视为"uuid 不在此处"）
+                }
+            }
+            if cache.get(rpath.as_str()).map(|(u, _)| u == &d.uuid).unwrap_or(false) {
+                return Some(rpath.clone());
+            }
+        }
+        None
+    }
+
+    /// MOVE 失败后的收敛清理：本地已在新路径完成内容同步时，远端旧路径若仍残留
+    /// 同一文档的陈旧副本则补删（本地路径为事实权威），防远端新旧两份长期并存。
+    /// 删除前下载验证 uuid——旧路径可能已被其他文档复用，不得误删他者
+    fn cleanup_stale_remote_old_path(
+        &mut self,
+        d: &LocalDoc,
+        row: &SyncStateRow,
+        remote_files: &BTreeMap<String, RemoteEntry>,
+    ) {
+        if row.file_path == d.rel || !remote_files.contains_key(&row.file_path) {
+            return;
+        }
+        let Ok(b) = self.backend.get(&row.file_path) else { return };
+        self.report.bytes_down += b.len() as u64;
+        let (u, _) = parse_uuid_title(&String::from_utf8_lossy(&b));
+        if u != d.uuid {
+            return; // 旧路径已被其他文档占用
+        }
+        match self.backend.delete(&row.file_path) {
+            Ok(()) => {
+                self.report.deleted_remote += 1;
+                self.log(&row.file_path, "up", 0, "delete", "stale-after-rename");
+            }
+            Err(e) => self.warn(format!("清理远端旧路径失败 {}：{}", row.file_path, e.message)),
+        }
+    }
+
     fn sync_one_doc(
         &mut self,
         d: &LocalDoc,
         row: Option<&SyncStateRow>,
         remote_files: &BTreeMap<String, RemoteEntry>,
-        _manifest: &TombstoneManifest,
+        manifest: &mut TombstoneManifest,
         handled_remote: &mut std::collections::HashSet<String>,
+        state_by_path: &BTreeMap<String, SyncStateRow>,
+        remote_probe: &mut std::collections::HashMap<String, (String, Vec<u8>)>,
     ) -> Result<(), AppError> {
         handled_remote.insert(d.rel.clone());
         let bytes = fs::read(self.lib.root.join(&d.rel))?;
         let Some(row) = row else {
-            // 新文档（本地新建）：直接上传
+            // 新文档（本地新建，或回收站还原后复活）：直接上传；
+            // 若 uuid 在墓碑内必须清除——否则对端按墓碑再删，形成删除循环
             let etag = self.backend.put(&d.rel, &bytes)?;
+            manifest.mark_restored(&d.uuid, self.now); // 复活标记随清单传播，防对端按旧墓碑再删
             self.report.uploaded += 1;
             self.report.bytes_up += bytes.len() as u64;
             self.db.upsert(&SyncStateRow {
@@ -1073,6 +1301,7 @@ impl<'a> SyncEngine<'a> {
             (true, false) => {
                 // 本地修改 → 上传
                 let etag = self.backend.put(&d.rel, &bytes)?;
+                self.cleanup_stale_remote_old_path(d, row, remote_files);
                 self.report.uploaded += 1;
                 self.report.bytes_up += bytes.len() as u64;
                 self.db.upsert(&SyncStateRow {
@@ -1092,6 +1321,31 @@ impl<'a> SyncEngine<'a> {
                 match remote_files.get(&d.rel) {
                     Some(_) => {
                         let bytes = self.backend.get(&d.rel)?;
+                        // uuid 守卫：远端该路径可能是"对端新文档占用了本端改名后的路径"
+                        // （mv Overwrite:F 失败后状态行已指向新名）。uuid 不匹配时
+                        // 不得覆盖本地文档身份——本地唯一化改名让位，对端文档下轮按新文档导入
+                        let (r_uuid, _) = parse_uuid_title(&String::from_utf8_lossy(&bytes));
+                        if !r_uuid.is_empty() && r_uuid != d.uuid {
+                            let stem = d.rel.rsplit('/').next().unwrap_or(&d.rel);
+                            let parent = d.rel.strip_suffix(stem).unwrap_or("").trim_end_matches('/');
+                            let desired = format!("{}（本机）.md", stem.trim_end_matches(".md"));
+                            let new_rel = if parent.is_empty() { desired } else { format!("{parent}/{desired}") };
+                            // rename_local_doc 内部唯一化，不会覆盖对端文档
+                            let renamed = self.rename_local_doc(&d.rel, &new_rel)?;
+                            let mut nr = row.clone();
+                            nr.file_path = renamed.clone();
+                            // 清 synced_hash：新路径从未上传，按"未同步"处理——
+                            // 否则下轮 (false,true)→None 会把未编辑的本机文档误判
+                            // "远端被删"移入回收站；清空后走 (true,false) 在新路径重传
+                            nr.synced_hash = String::new();
+                            nr.remote_etag = String::new();
+                            self.db.upsert(&nr);
+                            self.warn(format!(
+                                "路径 {} 已被对端新文档占用，本地文档已改名为 {renamed}（将重新上传）",
+                                d.rel
+                            ));
+                            return Ok(());
+                        }
                         self.report.bytes_down += bytes.len() as u64;
                         let hash = hash_hex(&bytes);
                         self.write_local_doc(&d.rel, &bytes)?;
@@ -1117,7 +1371,19 @@ impl<'a> SyncEngine<'a> {
                         if local_changed {
                             self.warn(format!("远端被删除但本地有修改，保留并重传：{}", d.rel));
                             let etag = self.backend.put(&d.rel, &bytes)?;
+                            manifest.mark_restored(&d.uuid, self.now); // 复活语义同上：防删除循环
                             let _ = etag;
+                        } else if remote_files.contains_key(&row.file_path) {
+                            // 本地已改名但远端旧路径仍在（本轮 MOVE 失败或尚未轮到传播）：
+                            // 这是改名待收敛而非外部删除——不删本地，等 propagate_renames 重试
+                            self.warn(format!("远端旧路径仍存在（改名传播待重试）：{}", d.rel));
+                        } else if self
+                            .probe_remote_uuid(d, remote_files, state_by_path, handled_remote, remote_probe)
+                            .is_some()
+                        {
+                            // 远端改名被误判为删除：uuid 仍在远端其他路径 → 不删，
+                            // 交给"远端独有文件"探测做改名跟随（旧路径消失 + 新路径同 uuid）
+                            self.warn(format!("远端疑似改名，跳过本地删除等待跟随：{}", d.rel));
                         } else {
                             self.lib.delete_to_trash(&d.rel)?;
                             self.db.remove(&d.uuid);
@@ -1136,6 +1402,8 @@ impl<'a> SyncEngine<'a> {
                     Err(e) if e.code == "not_found" => {
                         self.warn(format!("远端版本不在预期路径（可能被对端改名）：{}", d.rel));
                         let etag = self.backend.put(&d.rel, &bytes)?;
+                        manifest.mark_restored(&d.uuid, self.now); // 重传含复活语义
+                        self.cleanup_stale_remote_old_path(d, row, remote_files);
                         self.report.uploaded += 1;
                         self.report.bytes_up += bytes.len() as u64;
                         self.db.upsert(&SyncStateRow {
@@ -1199,28 +1467,78 @@ impl<'a> SyncEngine<'a> {
         }
     }
 
-    // -- 附件（存在即上传；远端新增下载） ----------------------------------------
+    // -- 附件（增量：与文档同套 hash/etag 状态行语义；远端新增下载） ------------------
 
     fn sync_attachments(&mut self, atts: &[LocalAttachment], remote_files: &BTreeMap<String, RemoteEntry>) {
         for a in atts {
-            let up_needed = match remote_files.get(&a.rel) {
-                None => true,
-                Some(e) => {
-                    if !e.etag.is_empty() {
-                        e.etag != a.hash
-                    } else {
-                        true // 保守重传（附件通常少且小）
-                    }
-                }
+            // 状态行以 "attachment:<rel>" 为主键（与文档 uuid 命名空间不冲突）。
+            // 判定与文档一致：本地 hash vs synced_hash、远端 etag vs 记录 etag（缺失下载比对）；
+            // 旧实现拿服务器 etag 与本地 blake3 直接比较，真实服务器上恒不等 → 每批全量重传
+            let key = format!("attachment:{}", a.rel);
+            let row = self.db.get(&key);
+            let local_changed = row.as_ref().map(|r| r.synced_hash != a.hash).unwrap_or(true);
+            let remote_entry = remote_files.get(&a.rel);
+            let remote_changed = match (row.as_ref(), remote_entry) {
+                (None, _) => false,
+                (Some(_), None) => true, // 远端被外部删除：重新上传保存在（V1 附件保守）
+                (Some(r), Some(e)) if !e.etag.is_empty() => r.remote_etag != e.etag,
+                (Some(r), Some(_)) => match self.backend.get(&a.rel) {
+                    Ok(b) => hash_hex(&b) != r.synced_hash,
+                    Err(_) => false,
+                },
             };
-            if up_needed {
+            if local_changed || remote_entry.is_none() {
                 if let Ok(bytes) = fs::read(self.lib.root.join(&a.rel)) {
-                    if self.backend.put(&a.rel, &bytes).is_ok() {
+                    if let Ok(etag) = self.backend.put(&a.rel, &bytes) {
                         self.report.uploaded += 1;
                         self.report.bytes_up += bytes.len() as u64;
                         self.progress(&a.rel, "upload", bytes.len() as u64);
                         self.log(&a.rel, "up", bytes.len() as u64, "put", "ok");
+                        self.db.upsert(&SyncStateRow {
+                            doc_uuid: key,
+                            file_path: a.rel.clone(),
+                            local_hash: a.hash.clone(),
+                            synced_hash: a.hash.clone(),
+                            remote_etag: etag,
+                            synced_at: self.now,
+                        });
                     }
+                }
+            } else if remote_changed {
+                // 本地未变、远端已变（对端更新）→ 下载，不以上传覆盖对端
+                if let Ok(bytes) = self.backend.get(&a.rel) {
+                    let hash = hash_hex(&bytes);
+                    let etag = remote_entry.map(|e| e.etag.clone()).unwrap_or_default();
+                    let dest = self.lib.root.join(&a.rel);
+                    let ok = {
+                        let _g = self.lib.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+                        atomic_write(&dest, &bytes).is_ok()
+                    };
+                    if ok {
+                        self.report.downloaded += 1;
+                        self.report.bytes_down += bytes.len() as u64;
+                        self.progress(&a.rel, "download", bytes.len() as u64);
+                        self.log(&a.rel, "down", bytes.len() as u64, "get", "ok");
+                        self.db.upsert(&SyncStateRow {
+                            doc_uuid: key,
+                            file_path: a.rel.clone(),
+                            local_hash: hash.clone(),
+                            synced_hash: hash,
+                            remote_etag: etag,
+                            synced_at: self.now,
+                        });
+                    }
+                }
+            } else if let (Some(r), Some(e)) = (row, remote_entry) {
+                if !e.etag.is_empty() && r.remote_etag != e.etag {
+                    self.db.upsert(&SyncStateRow {
+                        doc_uuid: format!("attachment:{}", a.rel),
+                        file_path: a.rel.clone(),
+                        local_hash: r.local_hash.clone(),
+                        synced_hash: r.synced_hash.clone(),
+                        remote_etag: e.etag.clone(),
+                        synced_at: self.now,
+                    });
                 }
             }
         }
@@ -1230,6 +1548,10 @@ impl<'a> SyncEngine<'a> {
             .map(|(p, e)| (p.clone(), e.etag.clone()))
             .collect();
         for (rp, _) in remote_atts {
+            if Self::safe_rel(&rp).is_err() {
+                self.warn(format!("跳过非法远端附件路径：{rp}"));
+                continue;
+            }
             if !atts.iter().any(|a| a.rel == rp) {
                 if let Ok(bytes) = self.backend.get(&rp) {
                     let dest = self.lib.root.join(&rp);
@@ -1269,7 +1591,25 @@ impl<'a> SyncEngine<'a> {
 
     // -- 本地写操作（全部经 LibraryService 单写者，3.3-6） --------------------------
 
+    /// 远端路径安全校验：拒绝 `..`、空段、反斜杠、控制字符、超长段（恶意/被入侵服务器
+    /// 可用 PROPFIND 文件名把写入定向到库外任意路径——P0 安全修复的引擎侧防线）
+    fn safe_rel(rel: &str) -> Result<(), AppError> {
+        if rel.is_empty() || rel.len() > 1024 {
+            return Err(AppError::new("forbidden", "非法的远端路径"));
+        }
+        for comp in rel.split('/') {
+            if comp.is_empty() || comp == "." || comp == ".." || comp.contains('\\') {
+                return Err(AppError::new("forbidden", "非法的远端路径"));
+            }
+            if comp.chars().any(|c| c.is_control()) || comp.len() > 255 {
+                return Err(AppError::new("forbidden", "非法的远端路径"));
+            }
+        }
+        Ok(())
+    }
+
     fn write_local_doc(&self, rel: &str, bytes: &[u8]) -> Result<(), AppError> {
+        Self::safe_rel(rel)?;
         let dest = self.lib.root.join(rel);
         let _g = self.lib.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(parent) = dest.parent() {
@@ -1279,12 +1619,16 @@ impl<'a> SyncEngine<'a> {
         Ok(())
     }
 
-    /// 下载入库：无 id 文件分配新 uuid 并回写；同名冲突自动唯一化。返回实际相对路径
+    /// 下载入库：无 id 文件分配新 uuid 并回写；外来 id 与库内既有文档重复时重新分配
+    /// （FR-IMP-01/FR-SYN-08：身份锚点唯一，防复制文件产生双 uuid 误判 MOVE）；
+    /// 同名冲突自动唯一化。返回实际相对路径
     fn create_local_doc(&self, remote_path: &str, bytes: &[u8]) -> Result<String, AppError> {
+        Self::safe_rel(remote_path)?;
         let content = String::from_utf8_lossy(bytes);
         let (fm_opt, body) = frontmatter::split(&content);
         let mut fm = fm_opt.unwrap_or_default();
-        if fm.get("id").is_none() {
+        let foreign_id = fm.get("id").unwrap_or("").to_string();
+        if foreign_id.is_empty() || self.lib.library_has_uuid(&foreign_id, remote_path) {
             fm.set("id", &uuid_new());
         }
         if fm.get("fmt").is_none() {
@@ -1317,6 +1661,8 @@ impl<'a> SyncEngine<'a> {
     }
 
     fn rename_local_doc(&self, from_rel: &str, to_rel: &str) -> Result<String, AppError> {
+        Self::safe_rel(from_rel)?;
+        Self::safe_rel(to_rel)?;
         let filename = to_rel.rsplit('/').next().unwrap_or("未命名.md").to_string();
         let parent_rel = to_rel
             .strip_suffix(&filename)
@@ -1438,6 +1784,14 @@ pub fn resolve_conflict(lib: &Library, copy_rel: &str, keep_remote: bool) -> Res
             None => fm2.set("id", &uuid_new()),
         }
         fm2.entries.retain(|(k, _)| k != "conflict_of"); // 使命完成，不长期保留
+        // 剥离副本创建时的标题戳："（远程冲突备份 …）"不应作为正式标题长期存在
+        if let Some(t) = fm2.get("title").map(|s| s.to_string()) {
+            if let Some(pos) = t.find("（远程冲突备份") {
+                let stripped = t[..pos].trim_end().to_string();
+                let title = if stripped.is_empty() { t.clone() } else { stripped };
+                fm2.set("title", &title);
+            }
+        }
         let full = format!("{}\n{}", fm2.render(), body);
         {
             let _g = lib.write_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1581,6 +1935,50 @@ mod tests {
     }
 
     // -- A3：增量同步，无重复上传，双端收敛 -----------------------------------
+
+    // -- 修复回归：对端新文档占用本端改名目标 → 本地让位改名并重传，绝不误删 -----------
+
+    #[test]
+    fn occupied_rename_path_yields_not_trashes() {
+        let a = open_lib("occ-a");
+        let mut dav = MockDav::new();
+        // A 的文档放在子文件夹（内容自始不变）
+        a.create_folder("", "卷").unwrap();
+        let old = mk_doc(&a, "新文档", "A 的内容");
+        let old = a.move_doc(&old, "docs/卷").unwrap();
+        match run_first(&a, &mut dav, None) {
+            SyncOutcome::Done(_) => {}
+            _ => panic!("A 首绑应上传"),
+        }
+        let b = open_lib("occ-b");
+        match run_first(&b, &mut dav, None) {
+            SyncOutcome::Done(_) => {}
+            _ => panic!("B 应下载"),
+        }
+        // B 在根目录新建同名文档并同步（远端 docs/新文档.md 持 B 的 uuid）
+        let _target = mk_doc(&b, "新文档", "B 的内容");
+        run_bound(&b, &mut dav);
+
+        // A 把子文件夹中的文档移到根（目标名与 B 的远端文档同名；内容未变）
+        let _moved = a.move_doc(&old, "").unwrap();
+        let (docs0, _) = scan_local(&a);
+        assert_eq!(docs0.iter().find(|d| d.rel.contains("新文档")).unwrap().rel, "docs/新文档.md");
+
+        // A 同步：mv 失败（Overwrite:F）→ (false,true) uuid 守卫 → 本地让位改名
+        let ra = run_bound(&a, &mut dav);
+        assert_eq!(ra.trashed_local, 0, "让位不得删除本地文档");
+        let (docs, _) = scan_local(&a);
+        assert!(
+            docs.iter().any(|d| d.rel.ends_with("新文档（本机）.md")),
+            "本地让位改名：{:?}",
+            docs.iter().map(|d| d.rel.clone()).collect::<Vec<_>>()
+        );
+
+        // 再同步：让位文档按未同步处理在新路径重传（不进回收站）
+        let ra2 = run_bound(&a, &mut dav);
+        assert_eq!(ra2.trashed_local, 0, "重传路径不得误删");
+        assert!(ra2.uploaded >= 1, "让位文档重传：{:?}", ra2.uploaded);
+    }
 
     #[test]
     fn a3_incremental_two_devices() {
@@ -2024,5 +2422,134 @@ mod tests {
         edit(&a, &doc, "新内容");
         let st = doc_sync_states(&a, &db);
         assert_eq!(st[0].state, "pending");
+    }
+
+    // -- 修复回归：对端改名不得被误判为远端删除（改名跟随主场景） -------------------
+
+    #[test]
+    fn remote_rename_follows_not_trashes() {
+        let a = open_lib("rrf-a");
+        let mut dav = MockDav::new();
+        let doc = mk_doc(&a, "改名章", "内容不变");
+        match run_first(&a, &mut dav, None) {
+            SyncOutcome::Done(_) => {}
+            _ => panic!("首绑应上传"),
+        }
+        let b = open_lib("rrf-b");
+        match run_first(&b, &mut dav, None) {
+            SyncOutcome::Done(_) => {}
+            _ => panic!("B 应下载"),
+        }
+
+        // B 改名（本地 MOVE + title 变更），B 同步传播 MOVE
+        lib_rename(&b, &doc, "新名字章");
+        run_bound(&b, &mut dav);
+
+        // A 同步：本地未动、远端已 MOVE → A 必须跟随改名，不得把本地文档入回收站
+        let ra = run_bound(&a, &mut dav);
+        assert_eq!(ra.trashed_local, 0, "远端改名不得被误判为删除");
+        let (docs, _) = scan_local(&a);
+        assert_eq!(docs.len(), 1, "A 仍有一篇文档");
+        assert!(
+            docs[0].rel.ends_with("新名字章.md"),
+            "A 跟随远端改名：{:?}",
+            docs[0].rel
+        );
+        // 身份不变
+        let da = a.read_doc(&docs[0].rel).unwrap();
+        let db_ = b.read_doc(&docs[0].rel).unwrap();
+        assert_eq!(da.uuid, db_.uuid, "改名不换身份锚点");
+    }
+
+    fn lib_rename(lib: &Library, rel: &str, new_title: &str) {
+        lib.rename_doc_inner(rel, new_title).unwrap();
+    }
+
+    // -- 修复回归：回收站还原后重上传不得被墓碑再删（复活标记跨设备传播） ----------
+
+    #[test]
+    fn restore_after_delete_resurrects_not_loops() {
+        let a = open_lib("res-a");
+        let mut dav = MockDav::new();
+        let doc = mk_doc(&a, "复活章", "内容");
+        match run_first(&a, &mut dav, None) {
+            SyncOutcome::Done(_) => {}
+            _ => panic!(),
+        }
+        let b = open_lib("res-b");
+        match run_first(&b, &mut dav, None) {
+            SyncOutcome::Done(_) => {}
+            _ => panic!(),
+        }
+
+        // A 删除 → 传播；B 收到删除
+        let backup = a.delete_to_trash(&doc).unwrap();
+        run_bound(&a, &mut dav);
+        run_bound(&b, &mut dav);
+        assert!(b.read_doc(&doc).is_err(), "删除传播到 B（A11）");
+
+        // A 从回收站还原（同 uuid 回到原路径）→ 重上传
+        a.restore_from_trash(&backup, &doc).unwrap();
+        run_bound(&a, &mut dav);
+
+        // B 同步：不得因旧墓碑把远端复活文档再删，而应下载回来
+        let rb = run_bound(&b, &mut dav);
+        assert_eq!(rb.deleted_remote, 0, "复活文档不得被 B 再删");
+        assert!(b.read_doc(&doc).is_ok(), "B 应重新获得还原的文档");
+
+        // 远端仍存在该文件，且清单带复活标记
+        assert!(dav.files.contains_key(&doc), "远端保留复活文档");
+        let manifest = TombstoneManifest::parse(&dav.files[MANIFEST_SYNC]).unwrap();
+        let restored = manifest
+            .tombstones
+            .iter()
+            .find(|t| t.path == doc || t.uuid == a.read_doc(&doc).unwrap().uuid);
+        if let Some(t) = restored {
+            assert!(!t.active(), "墓碑必须已被复活标记中和：{t:?}");
+        }
+    }
+
+    // -- 修复回归：附件增量（真实服务器 etag ≠ 本地 hash，未变不重传） --------------
+
+    #[test]
+    fn attachments_incremental_with_opaque_etag() {
+        let a = open_lib("att-a");
+        let mut dav = MockDav::new();
+        // 模拟真实服务器：etag 返回自身值而非内容 hash
+        dav.opaque_etag = true;
+        let doc = mk_doc(&a, "附件章", "内容");
+        let _att_rel = "attachments/20260101-1.png";
+        {
+            let dir = a.root.join("attachments");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("20260101-1.png"), b"png-bytes-v1").unwrap();
+        }
+        match run_first(&a, &mut dav, None) {
+            SyncOutcome::Done(_) => {}
+            _ => panic!(),
+        }
+        let _ = doc;
+
+        // 未变附件再同步：零重传（旧实现拿 etag 比 hash 恒不等 → 全量重传）
+        let r2 = run_bound(&a, &mut dav);
+        assert_eq!(r2.uploaded, 0, "附件未变不得重传（FR-SYN-03）");
+    }
+
+    // -- 修复回归：恶意远端文件名不得写出库外（路径穿越） ---------------------------
+
+    #[test]
+    fn malicious_remote_filename_rejected() {
+        use crate::dav::parse_propfind;
+        let xml = r#"<multistatus><response><href>/dav/docs/..%2F..%2Fevil.md</href><propstat><prop><resourcetype/><getetag>x</getetag></prop></propstat></response></multistatus>"#;
+        let entries = parse_propfind(xml);
+        // 解析层产出路径段；list_all 的安全闸会拒绝含 .. 的条目
+        assert!(!entries.is_empty());
+        let full = format!("docs/{}", entries[0].path);
+        assert!(
+            full.split('/').any(|c| c == ".."),
+            "测试前提：解码后确实包含穿越段"
+        );
+        // safe_remote_path 拒绝（dav.rs 的 P0 安全闸）
+        assert!(!crate::dav::safe_remote_path(&full));
     }
 }

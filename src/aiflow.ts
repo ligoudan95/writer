@@ -38,6 +38,11 @@ export interface AiEditorBridge {
   suppressSave: (on: boolean) => void;
 }
 
+/** FR-AI-03/04：发送前上下文用量展示（字符口径；面板消费） */
+function kindLabel(kind: string): string {
+  return kind === "polish" ? "润色" : kind === "continue" ? "续写" : "讨论";
+}
+
 let ed: AiEditorBridge | null = null;
 export function setAiEditor(b: AiEditorBridge) {
   ed = b;
@@ -71,6 +76,7 @@ export const ai = reactive({
   polishOpen: false,
   polish: {
     state: "idle" as "idle" | "running" | "review",
+    jobId: "",
     style: "concise",
     extra: "",
     from: 0,
@@ -101,6 +107,7 @@ export const ai = reactive({
   chat: {
     convId: "",
     docUuid: "",
+    jobId: "",
     messages: [] as { role: string; content: string }[],
     streaming: false,
     streamText: "",
@@ -108,6 +115,9 @@ export const ai = reactive({
     pasteText: "",
     error: "",
   },
+
+  /** 最近一次请求的上下文字符量（发送前预览口径，面板展示） */
+  lastRequestChars: 0,
 });
 
 export function defaultProvider(): AiProvider | null {
@@ -139,12 +149,15 @@ function privacyGate(what: string): boolean {
 // 事件路由（ai:chunk/done/error/cancelled → 各流程）
 // ---------------------------------------------------------------------------
 
+let listenersReady = false;
+
 export async function initAi() {
   try {
     ai.providers = await api.aiProviderList();
   } catch {
     /* 库未就绪时静默 */
   }
+  if (listenersReady) return () => undefined; // 库切换重复调用：监听器防重
   try {
     const { listen } = await import("@tauri-apps/api/event");
     const un: (() => void)[] = [];
@@ -152,10 +165,10 @@ export async function initAi() {
       await listen<{ jobId: string; kind: string; text: string }>("ai:chunk", (e) => {
         const p = e.payload;
         if (p.kind === "polish") return; // 润色流式仅计数，diff 只对完整响应计算
-        if (p.kind === "continue") {
+        if (p.kind === "continue" && p.jobId === ai.cont.jobId) {
           ai.cont.text += p.text;
           refreshDraft();
-        } else if (p.kind === "chat") {
+        } else if (p.kind === "chat" && p.jobId === ai.chat.jobId) {
           ai.chat.streamText += p.text;
         }
       }),
@@ -163,36 +176,52 @@ export async function initAi() {
     un.push(
       await listen<{ jobId: string; kind: string; content: string }>("ai:done", (e) => {
         const p = e.payload;
-        if (p.kind === "polish") onPolishDone(p.content);
-        else if (p.kind === "continue") onContinueDone();
-        else onChatDone(p.content);
+        // jobId 门控：切换文档/新作业后到达的陈旧事件不得污染当前状态
+        if (p.kind === "polish" && p.jobId === ai.polish.jobId) onPolishDone(p.content);
+        else if (p.kind === "continue" && p.jobId === ai.cont.jobId) onContinueDone();
+        else if (p.kind === "chat" && p.jobId === ai.chat.jobId) onChatDone(p.content);
       }),
     );
     un.push(
       await listen<{ jobId: string; kind: string; code: string; message: string }>("ai:error", (e) => {
         const p = e.payload;
         const msg = `[${p.code}] ${p.message}`;
-        if (p.kind === "polish") {
+        if (p.kind === "polish" && p.jobId === ai.polish.jobId) {
           ai.polish.state = "idle";
           ai.polish.error = msg;
-        } else if (p.kind === "continue") {
+        } else if (p.kind === "continue" && p.jobId === ai.cont.jobId) {
           if (ai.cont.state === "running") ai.cont.state = "idle";
           ai.cont.error = msg;
-          cleanupDraft();
-        } else {
+          try {
+            cleanupDraft();
+          } catch {
+            /* 草稿区间失效 */
+          }
+        } else if (p.kind === "chat" && p.jobId === ai.chat.jobId) {
           ai.chat.streaming = false;
           ai.chat.error = msg;
+        } else {
+          return; // 非当前作业的错误不广播
         }
+        // AI 失败非模态沉淀通知中心（FR-UI-06：面板可能已关，历史不丢）
+        void import("./notify").then((m) => m.notify("ai", `${kindLabel(p.kind)}失败：${msg}`));
       }),
     );
     un.push(
-      await listen<{ jobId: string; kind: string }>("ai:cancelled", () => {
-        // 用户取消（润色解锁 / 续写 Esc）：静默收尾
-        if (ai.polish.state === "running") ai.polish.state = "idle";
-        if (ai.cont.state === "running") ai.cont.state = "idle";
-        ai.chat.streaming = false;
+      await listen<{ jobId: string; kind: string }>("ai:cancelled", (e) => {
+        // 按 kind + jobId 收尾：迟到的取消事件不得复位新作业的状态
+        //（cancelled 在流循环收到下一个 SSE 项时才发出，可晚于新作业启动数秒）
+        const p = e.payload;
+        if (p.kind === "polish" && p.jobId === ai.polish.jobId && ai.polish.state === "running") {
+          ai.polish.state = "idle";
+        } else if (p.kind === "continue" && p.jobId === ai.cont.jobId && ai.cont.state === "running") {
+          ai.cont.state = "idle";
+        } else if (p.kind === "chat" && p.jobId === ai.chat.jobId) {
+          ai.chat.streaming = false;
+        }
       }),
     );
+    listenersReady = true;
     return () => un.forEach((f) => f());
   } catch {
     return () => undefined;
@@ -214,25 +243,85 @@ export function canPolish(): boolean {
 /** 处理中用户在选区按键 → 取消请求并立即解锁（不静默吞输入） */
 export function cancelRunning(reason: "polish" | "continue") {
   if (reason === "polish" && ai.polish.state === "running" && ai.polish.to) {
-    void api.aiJobCancel(ai.job ?? "");
+    void api.aiJobCancel(ai.polish.jobId);
     ai.polish.state = "idle";
+    ai.polish.jobId = ""; // 清除门控：迟到的 ai:done 不得把已取消的润色"复活"为 review
   }
   if (reason === "continue" && ai.cont.state !== "idle") {
     void api.aiJobCancel(ai.cont.jobId);
-    cleanupDraft();
+    if (!ai.cont.collapsed) cleanupDraft();
     ai.cont.state = "idle";
+    ai.cont.collapsed = false;
+    ai.cont.text = "";
   }
 }
 
-/** 打开润色面板（Ctrl+Shift+P / 工具栏；须有选区） */
+/** 切换文档前清理全部 AI 流程状态：A 文档的草稿/润色区间/会话绝不能落进 B 文档。
+ * 顺序：先清 jobId（陈旧事件全被门控丢弃）再尝试清草稿——草稿区间可能已失效
+ * （编辑器被清空/远端重载），removeDraft 抛错不得中断重置（否则门控被绕过） */
+export function resetAiForDocSwitch() {
+  // 1. 先断事件门控与状态
+  const polishJob = ai.polish.jobId;
+  const contJob = ai.cont.jobId;
+  const chatJob = ai.chat.jobId;
+  ai.polish.jobId = "";
+  ai.cont.jobId = "";
+  ai.chat.jobId = "";
+  if (ai.polish.state === "running") void api.aiJobCancel(polishJob);
+  if (ai.cont.state === "running") void api.aiJobCancel(contJob);
+  if (ai.chat.streaming) void api.aiJobCancel(chatJob);
+  // 2. 再清草稿（区间失效时静默放弃——内容本就是未接受的草稿）
+  try {
+    if (ai.cont.state === "draft" && !ai.cont.collapsed) cleanupDraft();
+  } catch {
+    // 草稿区间越界（编辑器内容已换）：无需处理
+  }
+  resetPolish();
+  ai.cont.state = "idle";
+  ai.cont.text = "";
+  ai.cont.collapsed = false;
+  ai.cont.error = "";
+  ai.chat.streaming = false;
+  ai.chat.streamText = "";
+  ai.chat.error = "";
+}
+
+/** 库切换时清空会话绑定：旧库 convId 在新库 meta.db 是孤儿行（防串库） */
+export function resetChatForLibrary() {
+  ai.chat.convId = "";
+  ai.chat.docUuid = "";
+  ai.chat.messages = [];
+  ai.chat.streaming = false;
+  ai.chat.streamText = "";
+  ai.chat.error = "";
+  ai.chat.jobId = "";
+}
+
+/** 打开润色面板（Ctrl+Shift+P / 工具栏；须有选区）；
+ * 未配置 Provider → 引导跳转设置（FR-UI-07 空状态） */
 export function openPolishUI() {
   if (!ai.enabled) return;
+  if (!defaultProvider()) {
+    notifyProviderGuide("润色");
+    return;
+  }
   if (!ed?.getSelection()?.text.trim()) {
     s.toast = { msg: "请先选中要润色的文字" };
     setTimeout(() => (s.toast = null), 2500);
     return;
   }
   ai.polishOpen = true;
+}
+
+/** FR-UI-07：未配置 AI 时的引导通知（一键跳转 Provider 配置） */
+function notifyProviderGuide(what: string) {
+  void import("./notify").then((m) =>
+    m.notify("ai", `尚未配置 AI Provider，无法使用${what}`, {
+      actionLabel: "去配置",
+      action: () => (ai.settingsOpen = true),
+      dur: 8000,
+    }),
+  );
 }
 
 export async function startPolish() {
@@ -256,11 +345,18 @@ export async function startPolish() {
   ai.polish.to = sel.to;
   ai.polish.original = sel.text;
   ai.polish.providerName = p.name;
-  const ack = await api.aiChatStart("polish", p.id, messages);
-  ai.job = ack.jobId;
+  ai.lastRequestChars = sel.text.length; // FR-AI-02 发送前用量（面板展示）
+  try {
+    const ack = await api.aiChatStart("polish", p.id, messages);
+    ai.polish.jobId = ack.jobId;
+  } catch (e) {
+    ai.polish.state = "idle";
+    ai.polish.error = (e as { message?: string }).message ?? String(e);
+  }
 }
 
 function onPolishDone(polished: string) {
+  if (ai.polish.state !== "running") return; // 已取消（用户已按键改动文档）：不得复活 review 态
   ai.polish.polished = polished;
   ai.polish.ops = diffOps(ai.polish.original, polished);
   ai.polish.blocks = opsToBlocks(ai.polish.ops);
@@ -292,6 +388,7 @@ export async function applyPolish(onlyAccepted: boolean) {
 export function resetPolish() {
   ai.polishOpen = false;
   ai.polish.state = "idle";
+  ai.polish.jobId = "";
   ai.polish.ops = null;
   ai.polish.blocks = [];
   ai.polish.accepts = [];
@@ -310,10 +407,18 @@ export function continueContext(n = 800) {
 }
 
 export async function startContinue() {
-  if (!ed) return;
+  if (!ed || !ai.enabled) return; // 全局关闭旁路修复：快捷键不得绕过开关
   const p = defaultProvider();
-  if (!p) return;
+  if (!p) {
+    notifyProviderGuide("续写");
+    return;
+  }
   if (!privacyGate("续写")) return;
+  if (ai.cont.state !== "idle") {
+    cancelRunning("continue"); // 已有草稿/在跑：先清理，防旧草稿成孤儿残留
+  }
+  // 挂起的 2s 保存计时器会把未接受草稿落盘，触发续写即取消
+  void import("./store").then((m) => m.cancelScheduledSave());
 
   const ctx = ed.contextAround(800);
   const parts: string[] = [];
@@ -333,8 +438,14 @@ export async function startContinue() {
   ai.cont.text = "";
   ai.cont.collapsed = false;
   ai.cont.anchor = ed.getCursor();
-  const ack = await api.aiChatStart("continue", p.id, messages);
-  ai.cont.jobId = ack.jobId;
+  ai.lastRequestChars = parts.join("\n\n").length; // FR-AI-03 发送前用量
+  try {
+    const ack = await api.aiChatStart("continue", p.id, messages);
+    ai.cont.jobId = ack.jobId;
+  } catch (e) {
+    ai.cont.state = "idle";
+    ai.cont.error = (e as { message?: string }).message ?? String(e);
+  }
 }
 
 function refreshDraft() {
@@ -361,7 +472,8 @@ function refreshDraft() {
 }
 
 function onContinueDone() {
-  ai.cont.state = "draft"; // 等待 Tab/Esc；流已结束
+  // 取消（Esc）与 done 竞态：已回 idle 则不得再拉回 draft（悬空区间）
+  if (ai.cont.state === "running") ai.cont.state = "draft"; // 等待 Tab/Esc；流已结束
 }
 
 /** Tab 接受：移除草稿 mark，单事务（AC A6） */
@@ -389,10 +501,7 @@ export function maybeCollapseDraft(cursor: number) {
     ed.removeDraft(ai.cont.draftFrom, ai.cont.draftTo);
     ed.suppressSave(false);
     ai.cont.collapsed = true;
-    s.toast = { msg: "续写草稿已收起为待插入（Tab 取回）" };
-    setTimeout(() => {
-      if (s.toast?.msg.includes("待插入")) s.toast = null;
-    }, 4000);
+    void import("./notify").then((m) => m.notify("ai", "续写草稿已收起为待插入（Tab 取回）", { dur: 4000 }));
   }
 }
 
@@ -420,22 +529,24 @@ function cleanupDraft() {
   ai.cont.text = "";
 }
 
-/** AI 编辑后走正常保存管线（进入撤销栈后自动保存） */
+/** AI 编辑后走正常保存管线：onUpdate 被抑制 → saveState 停留 saved，
+ * saveNow 会早退——显式置 dirty 强制落盘（否则接受后直接关窗即丢稿） */
 function scheduleAiSave() {
-  // 由 EditorPane 的 onUpdate 正常触发 scheduleSave；此处仅触发一次立即保存
-  import("./store").then((m) => void m.saveNow());
+  import("./store").then((m) => {
+    m.s.saveState = "dirty";
+    void m.saveNow();
+  });
 }
 
 // ---------------------------------------------------------------------------
 // 讨论（FR-AI-04 / AC A7 上下文拦截）
 // ---------------------------------------------------------------------------
 
-export async function openChat() {
-  ai.chatOpen = !ai.chatOpen;
-  if (!ai.chatOpen || !s.current) return;
-  // 会话与文档绑定（切换文档自动换会话）
+/** 加载/切换当前文档的会话（openChat 与文档切换 watch 共用；非 toggle 语义） */
+export async function loadConversation() {
+  if (!s.current) return;
   const docUuid = docUuidOf();
-  if (ai.chat.docUuid !== docUuid) {
+  if (ai.chat.docUuid !== docUuid || !ai.chat.convId) {
     const conv = await api.aiConversationEnsure(docUuid, s.current.title);
     ai.chat.convId = conv.id;
     ai.chat.docUuid = docUuid;
@@ -444,9 +555,20 @@ export async function openChat() {
   }
 }
 
-/** frontmatter id 即文档 uuid（与同步身份锚点同源，改道/改名后会话不断） */
+export async function openChat() {
+  ai.chatOpen = !ai.chatOpen;
+  if (!ai.chatOpen) return;
+  if (!defaultProvider()) {
+    notifyProviderGuide("讨论");
+    // 面板照常打开（可看历史），发送时会被拦截
+  }
+  await loadConversation();
+}
+
+/** frontmatter id 即文档 uuid（与同步身份锚点同源，改道/改名后会话不断）；
+ * 外部放入的无 id 文档以 path 兜底——否则多个空 uuid 文档共享同一会话串档 */
 export function docUuidOf(): string {
-  return s.current?.uuid ?? "";
+  return s.current?.uuid || s.current?.path || "";
 }
 
 function buildChatContext(): string | null {
@@ -479,14 +601,15 @@ function currentDocJson(): PMNode | null {
   return currentJsonFn();
 }
 
-export async function sendChat(text: string) {
+/** 返回是否已受理发送（隐私拦截返回 false，调用方据此保留用户输入不清空） */
+export async function sendChat(text: string): Promise<boolean> {
   const p = defaultProvider();
-  if (!p || !text.trim() || ai.chat.streaming) return;
+  if (!p || !text.trim() || ai.chat.streaming) return false; // 未进入发送管线：保留输入
+  // A7：隐私文档任何档位一律拦截（历史轮次可能复述过原文，none/paste 档也不放行）
+  if (!privacyGate("讨论")) return false;
+  // 会话守卫：openDoc 后未经 loadConversation / 切换竞态时不得把内容写进旧会话
+  if (!ai.chat.convId || ai.chat.docUuid !== docUuidOf()) await loadConversation();
   const ctx = buildChatContext();
-  // A7：文档级上下文 + 隐私文档 → 拦截（无/粘贴 档允许——用户显式提供）
-  if (ctx && (ai.chat.contextMode === "selection" || ai.chat.contextMode === "chapter" || ai.chat.contextMode === "doc")) {
-    if (!privacyGate("引用文档内容讨论")) return;
-  }
   ai.chat.messages.push({ role: "user", content: text });
   await api.aiMessageAppend(ai.chat.convId, "user", text);
   ai.chat.streaming = true;
@@ -497,8 +620,25 @@ export async function sendChat(text: string) {
     ...ai.chat.messages.slice(-16).map((m) => ({ role: m.role as ChatMsg["role"], content: m.content })),
   ];
   if (ctx) messages.push({ role: "user", content: `（讨论上下文，供参考）\n${ctx}` });
-  const ack = await api.aiChatStart("chat", p.id, messages);
-  ai.job = ack.jobId;
+  ai.lastRequestChars = messages.reduce((n, m) => n + m.content.length, 0); // FR-AI-04 发送前用量
+  try {
+    const ack = await api.aiChatStart("chat", p.id, messages);
+    ai.chat.jobId = ack.jobId;
+  } catch (e) {
+    ai.chat.streaming = false;
+    ai.chat.error = (e as { message?: string }).message ?? String(e);
+  }
+  return true;
+}
+
+/** 重试前移除末条未获回复的用户消息（UI 与后续上下文不翻倍；DB 旧记录待 M5 历史清理入口） */
+export function popLastUserMessage() {
+  for (let i = ai.chat.messages.length - 1; i >= 0; i--) {
+    if (ai.chat.messages[i].role === "user") {
+      ai.chat.messages.splice(i, 1);
+      return;
+    }
+  }
 }
 
 function onChatDone(content: string) {

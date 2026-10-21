@@ -73,6 +73,7 @@ async function save() {
       autoSync: autoSync.value,
     });
     applyCfg(cfg);
+    s.sync.autoSync = cfg.autoSync; // 立即生效（scheduleAutoSync 消费）
     password.value = "";
     if (cfg.enabled) void triggerSync();
   } finally {

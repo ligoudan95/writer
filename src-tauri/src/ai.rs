@@ -71,10 +71,12 @@ fn now_secs() -> u64 {
 // SSE 解析（纯逻辑，可单测）
 // ---------------------------------------------------------------------------
 
-/// 极简 SSE 增量解析器：处理跨 chunk 断行，产出完整 `data:` 负载行
+/// 极简 SSE 增量解析器：**字节缓冲** + 按完整行解码。
+/// SSE 按字节分帧，多字节 UTF-8 字符可能被 TCP/TLS 边界切开——
+/// 逐 chunk from_utf8_lossy 会把切断的中文变成 U+FFFD 替换符（正文损坏）
 #[derive(Default)]
 pub struct SseParser {
-    buf: String,
+    buf: Vec<u8>,
 }
 
 impl SseParser {
@@ -82,31 +84,57 @@ impl SseParser {
         Self::default()
     }
 
-    /// 喂入一段响应文本，返回其中完整 data 行的负载（不含 "data: " 前缀）
-    pub fn feed(&mut self, chunk: &str) -> Vec<String> {
-        self.buf.push_str(chunk);
+    /// 喂入一段响应字节，返回其中完整 data 行的负载（不含 "data: " 前缀）。
+    /// UTF-8 多字节序列不含 0x0A，按 \n 字节切分不会截断字符
+    pub fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
-        while let Some(pos) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=pos).collect();
-            let line = line.trim_end_matches(['\n', '\r']);
-            if let Some(payload) = line.strip_prefix("data:") {
-                out.push(payload.trim_start().to_string());
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+            let mut line = &line_bytes[..line_bytes.len() - 1];
+            if line.last() == Some(&b'\r') {
+                line = &line[..line.len() - 1];
             }
-            // 非 data 行（event:/注释/空行）按 SSE 规范忽略
+            if let Ok(s) = std::str::from_utf8(line) {
+                if let Some(payload) = s.strip_prefix("data:") {
+                    out.push(payload.trim_start().to_string());
+                }
+            }
+            // 非 data 行（event:/注释/空行）按 SSE 规范忽略；非 UTF-8 行容错丢弃
         }
         out
     }
 }
 
-/// 从 chat.completions chunk JSON 中提取 delta 文本
-pub fn parse_delta(payload: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
-    v.get("choices")?
-        .get(0)?
-        .get("delta")?
-        .get("content")?
-        .as_str()
-        .map(|s| s.to_string())
+/// 从 chat.completions chunk JSON 中提取 delta 文本。
+/// 流中 error 事件（OpenAI 兼容端中途下发的 {"error":...}）→ Err 归因上报，
+/// 不再被静默吞掉后以不完整内容收场（FR-AI-08）
+pub fn parse_delta(payload: &str) -> Result<Option<String>, AppError> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Ok(None); // 非 JSON 负载（[DONE] 等）忽略
+    };
+    if let Some(err) = v.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("未知错误");
+        let code = match err
+            .get("code")
+            .and_then(|c| c.as_i64())
+            .or_else(|| err.get("status").and_then(|c| c.as_i64()))
+        {
+            Some(401) | Some(403) => "ai_auth",
+            Some(429) => "ai_rate_limited",
+            _ => "ai_protocol",
+        };
+        return Err(AppError::new(code, format!("流中错误事件：{msg}")));
+    }
+    Ok(v.get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string()))
 }
 
 /// 非流式响应提取完整回复
@@ -306,13 +334,24 @@ async fn chat_once(
             break; // drop stream → 连接断开（真实中断）
         }
         let chunk = item.map_err(|e| map_reqwest_err(&e))?;
-        for payload in parser.feed(&String::from_utf8_lossy(&chunk)) {
+        for payload in parser.feed(&chunk) {
             if payload == "[DONE]" {
                 break; // 服务器随后自然关流；此处提前结束解析即可
             }
-            if let Some(delta) = parse_delta(&payload) {
-                full.push_str(&delta);
-                batch.push_str(&delta);
+            match parse_delta(&payload) {
+                Ok(Some(delta)) => {
+                    full.push_str(&delta);
+                    batch.push_str(&delta);
+                }
+                Ok(None) => {}
+                // 流中 error 事件：先冲刷已收内容再上抛错误（前端按 ai:error 呈现）
+                Err(e) => {
+                    if !batch.is_empty() {
+                        emit_chunk(&batch);
+                        batch.clear();
+                    }
+                    return Err(e);
+                }
             }
         }
         if !batch.is_empty() && last_flush.elapsed() >= Duration::from_millis(50) {
@@ -378,27 +417,52 @@ mod tests {
     fn sse_parses_across_chunk_boundaries() {
         let mut p = SseParser::new();
         // 跨 chunk 断行 + 多行负载 + 忽略非 data 行
-        let a = p.feed("event: message\ndata: {\"a\":1}\nda");
+        let a = p.feed(b"event: message\ndata: {\"a\":1}\nda");
         assert_eq!(a, vec![r#"{"a":1}"#.to_string()]);
-        let b = p.feed("ta: {\"b\":2}\n\ndata: [DONE]\n");
+        let b = p.feed(b"ta: {\"b\":2}\n\ndata: [DONE]\n");
         assert_eq!(b, vec![r#"{"b":2}"#.to_string(), "[DONE]".to_string()]);
     }
 
     #[test]
     fn sse_handles_crlf() {
         let mut p = SseParser::new();
-        let out = p.feed("data: x\r\ndata: y\r\n");
+        let out = p.feed(b"data: x\r\ndata: y\r\n");
         assert_eq!(out, vec!["x".to_string(), "y".to_string()]);
+    }
+
+    #[test]
+    fn sse_multibyte_split_across_chunks() {
+        // 中文（多字节 UTF-8）被切在字节边界：字节缓冲必须无损还原，不得出 U+FFFD
+        let mut p = SseParser::new();
+        let payload = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{}\"}}}}]}}\n\n", "中文续写内容");
+        let bytes = payload.as_bytes();
+        let cut = bytes.len() / 2;
+        let a = p.feed(&bytes[..cut]);
+        let b = p.feed(&bytes[cut..]);
+        assert!(a.is_empty() || !a.iter().any(|s| s.contains('\u{fffd}')));
+        let all: Vec<String> = a.into_iter().chain(b).collect();
+        let joined = all.join("");
+        assert!(joined.contains("中文续写内容"), "切断的中文必须无损还原：{joined}");
+        assert!(!joined.contains('\u{fffd}'));
     }
 
     #[test]
     fn delta_extraction() {
         assert_eq!(
-            parse_delta(r#"{"choices":[{"delta":{"content":"你好"}}]}"#).as_deref(),
+            parse_delta(r#"{"choices":[{"delta":{"content":"你好"}}]}"#).unwrap().as_deref(),
             Some("你好")
         );
-        assert_eq!(parse_delta(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#), None);
-        assert_eq!(parse_delta("not json"), None);
+        assert_eq!(parse_delta(r#"{"choices":[{"delta":{"role":"assistant"}}]}"#).unwrap(), None);
+        assert_eq!(parse_delta("not json").unwrap(), None);
+    }
+
+    #[test]
+    fn stream_error_event_attributed() {
+        // 流中 error 事件：不再被吞掉
+        let e = parse_delta(r#"{"error":{"message":"quota exceeded","code":429}}"#).unwrap_err();
+        assert_eq!(e.code, "ai_rate_limited");
+        let e = parse_delta(r#"{"error":{"message":"bad key","code":401}}"#).unwrap_err();
+        assert_eq!(e.code, "ai_auth");
     }
 
     #[test]

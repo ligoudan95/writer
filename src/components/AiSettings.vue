@@ -42,7 +42,8 @@ async function test() {
   testing.value = true;
   testMsg.value = "";
   try {
-    const r = await api.aiConnectivityTest(editing.value.baseUrl, apiKeyInput.value);
+    // providerId 传入：key 留空时 Rust 侧回退使用已存 Key（DPAPI）
+    const r = await api.aiConnectivityTest(editing.value.id, editing.value.baseUrl, apiKeyInput.value);
     testMsg.value = r.ok ? "✓ 连接成功" : `✗ ${r.message}`;
   } catch (e) {
     testMsg.value = `✗ ${(e as { message?: string }).message ?? String(e)}`;
@@ -53,23 +54,28 @@ async function test() {
 
 async function fetchModels() {
   if (!editing.value) return;
-  // 先保存再拉取（key 落盘后由 Rust 侧使用）
-  await save();
+  // 保存但不关编辑区（datalist 仍挂载）；用 save() 返回的真实 id（新建 Provider 旧 id 为空）
+  const saved = await save(false);
+  if (!saved) return;
   try {
-    models.value = await api.aiModelsFetch(editing.value.id);
+    models.value = await api.aiModelsFetch(saved.id);
   } catch (e) {
     testMsg.value = `✗ 拉取模型失败：${(e as { message?: string }).message ?? e}`;
   }
 }
 
-async function save() {
-  if (!editing.value) return;
+async function save(closePanel = true): Promise<AiProvider | null> {
+  if (!editing.value) return null;
   const saved = await api.aiProviderSave(editing.value, apiKeyInput.value || undefined);
+  // 回写 saved（含后端分配的新 id）：否则新建 Provider 下反复保存/拉模型
+  // 每次都以空 id 再入库 → 克隆出多个同名 Provider
+  editing.value = saved;
   if (saved.isDefault || (!ai.providers.some((p) => p.isDefault) && saved.enabled)) {
     await api.aiProviderSetDefault(saved.id);
   }
   await reloadProviders();
-  editing.value = null;
+  if (closePanel) editing.value = null;
+  return saved;
 }
 
 async function remove(id: string) {
@@ -172,7 +178,7 @@ const KIND_LABEL: Record<string, string> = { polish: "润色", continue: "续写
         <button class="btn small" :disabled="testing || !editing.baseUrl" @click="test">
           {{ testing ? "测试中…" : "测试连通" }}
         </button>
-        <button class="btn small primary" @click="save">保存</button>
+        <button class="btn small primary" @click="save()">保存</button>
         <button class="btn small ghost" @click="editing = null">取消</button>
         <span v-if="testMsg" :class="{ ok: testMsg.startsWith('✓') }" class="test-msg">{{ testMsg }}</span>
       </div>

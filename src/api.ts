@@ -27,7 +27,23 @@ export interface StartupInfo {
   root: string;
   fresh: boolean;
   pending: DocPayload[];
-  thirdpartyWarnings: string[];
+  thirdpartyWarnings?: string[];
+  auditWarnings?: string[];
+  tookOverStaleLock?: boolean;
+}
+export interface TrashEntry {
+  name: string;
+  origName: string;
+  origRel?: string;
+  isDir: boolean;
+  deletedAt: number;
+  size: number;
+  over30d: boolean;
+}
+export interface BackupInfo {
+  name: string;
+  size: number;
+  ts: number;
 }
 
 export interface SnapshotInfo {
@@ -74,6 +90,8 @@ export interface SyncReport {
   bytesUp: number;
   bytesDown: number;
   warnings: string[];
+  /** 库标识（切库后旧批次事件过滤用） */
+  libRoot?: string;
 }
 export interface SyncStatus {
   running: boolean;
@@ -132,6 +150,9 @@ const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
 /** 类型化 command 封装（5.3 契约的前端门面；NFR-16：前端不持有泛型 fs 能力） */
 export const api = {
   startup: () => call<StartupInfo>("library_startup"),
+  libraryRecentList: () => call<string[]>("library_recent_list"),
+  libraryOpen: (path: string) => call<StartupInfo>("library_open", { path }),
+  libraryCreate: (path: string) => call<StartupInfo>("library_create", { path }),
   list: () => call<TreeNode[]>("doc_list"),
   readDoc: (path: string) => call<DocPayload>("doc_read", { path }),
   writeDoc: (path: string, body: string, expectedHash: string, force = false) =>
@@ -141,8 +162,22 @@ export const api = {
   renameDoc: (path: string, newTitle: string) =>
     call<WriteResult>("doc_rename", { path, newTitle }),
   deleteNode: (path: string) => call<string>("doc_delete", { path }),
+  moveDoc: (path: string, destFolder: string) => call<string>("doc_move", { path, destFolder }),
+  moveFolder: (path: string, destParent: string) => call<string>("folder_move", { path, destParent }),
+  reorderDocs: (folder: string, orderedPaths: string[]) =>
+    call<string[]>("doc_reorder", { folder, orderedPaths }),
   restoreFromTrash: (trashName: string, origRel: string) =>
     call<null>("trash_restore", { trashName, origRel }),
+  trashList: () => call<TrashEntry[]>("trash_list"),
+  trashDelete: (trashName: string) => call<null>("trash_delete", { trashName }),
+  trashEmpty: () => call<number>("trash_empty"),
+  backupNow: (includeAttachments: boolean, copyTo?: string) =>
+    call<BackupInfo>("backup_now", { includeAttachments, copyTo }),
+  backupList: () => call<BackupInfo[]>("backup_list"),
+  diagnosticsExport: (dest: string) => call<null>("diagnostics_export", { dest }),
+  logWrite: (level: string, requestId: string, message: string) =>
+    call<null>("log_write", { level, requestId, message }),
+  logsDir: () => call<string>("logs_dir"),
   createFolder: (parent: string, name: string) =>
     call<TreeNode>("folder_create", { parent, name }),
   renameFolder: (path: string, newName: string) =>
@@ -187,8 +222,8 @@ export const api = {
   aiProviderDelete: (id: string) => call<null>("ai_provider_delete", { id }),
   aiProviderSetDefault: (id: string | null) =>
     call<null>("ai_provider_set_default", { id }),
-  aiConnectivityTest: (baseUrl: string, apiKey: string) =>
-    call<DavTestResult>("ai_connectivity_test", { baseUrl, apiKey }),
+  aiConnectivityTest: (providerId: string, baseUrl: string, apiKey: string) =>
+    call<DavTestResult>("ai_connectivity_test", { providerId, baseUrl, apiKey }),
   aiModelsFetch: (providerId: string) => call<string[]>("ai_models_fetch", { providerId }),
   aiChatStart: (kind: "polish" | "continue" | "chat", providerId: string, messages: ChatMsg[]) =>
     call<{ jobId: string; chars: number }>("ai_chat_start", { kind, providerId, messages }),
@@ -198,6 +233,8 @@ export const api = {
   aiMessageList: (convId: string) => call<AiMessage[]>("ai_message_list", { convId }),
   aiMessageAppend: (convId: string, role: string, content: string) =>
     call<null>("ai_message_append", { convId, role, content }),
+  aiMessageDeleteLast: (convId: string, role: string) =>
+    call<null>("ai_message_delete_last", { convId, role }),
   aiRequestLog: (limit?: number) => call<AiRequestLog[]>("ai_request_log", { limit }),
   aiRequestLogClear: () => call<null>("ai_request_log_clear"),
   docSetPrivacy: (path: string, privacy: boolean) =>

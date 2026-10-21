@@ -56,6 +56,8 @@ ok("TXT: 保留标题文字", txt.includes("标题一") && txt.includes("标题�
 ok("TXT: 无 markdown 标记", !txt.includes("#") || !/^#+ /m.test(txt));
 ok("TXT: 无加粗星号", !txt.includes("**"));
 ok("TXT: 任务列表转文字", txt.includes("[待办] 待办事项") && txt.includes("[已办] 已办事项"));
+// 修复回归：bulletList 的 listItem 此前被 walk 静默跳过 → 整段文字消失
+ok("TXT: 无序列表文字保留", txt.includes("无序一") && txt.includes("无序二"), txt);
 ok("TXT: 表格转制表符", /甲\t乙/.test(txt) && /a1\tb1/.test(txt));
 ok("TXT: 引用保留", txt.includes("引用一行内容"));
 const txtCrlf = exportTxt(doc, true);
