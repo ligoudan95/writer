@@ -20,21 +20,45 @@ use crate::library::AppError;
 /// 运行中的 AI 作业注册表（job_id → 取消标志）
 pub struct AiState {
     pub jobs: Mutex<BTreeMap<String, Arc<AtomicBool>>>,
-    pub client: reqwest::Client,
+    /// 网络出口经 netcfg（默认直连绕过系统代理）；设置变更时热重建
+    client: std::sync::RwLock<reqwest::Client>,
 }
 
 impl AiState {
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .unwrap_or_default();
+        Self::with_config(&crate::netcfg::load())
+    }
+
+    pub fn with_config(cfg: &crate::netcfg::NetConfig) -> Self {
         Self {
             jobs: Mutex::new(BTreeMap::new()),
-            client,
+            client: std::sync::RwLock::new(build_client(cfg)),
         }
     }
+
+    /// Client 内部是 Arc，clone 廉价；进行中作业持旧客户端自然收尾
+    pub fn client(&self) -> reqwest::Client {
+        self.client
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 网络设置变更后重建（旧客户端由运行中作业持有至结束）
+    pub fn rebuild(&self, cfg: &crate::netcfg::NetConfig) {
+        *self.client.write().unwrap_or_else(|e| e.into_inner()) = build_client(cfg);
+    }
+}
+
+fn build_client(cfg: &crate::netcfg::NetConfig) -> reqwest::Client {
+    crate::netcfg::apply_async(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .connect_timeout(Duration::from_secs(15)),
+        cfg,
+    )
+    .build()
+    .unwrap_or_default()
 }
 
 impl Default for AiState {
@@ -240,7 +264,7 @@ pub async fn run_chat_job(
     let ChatJob { id, kind, provider, api_key, messages, lib_root } = job;
     let cancel = Arc::new(AtomicBool::new(false));
     register_job(&state, id.clone(), cancel.clone());
-    let outcome = chat_once(&state.client, &provider, &api_key, &messages, &cancel, |text| {
+    let outcome = chat_once(&state.client(), &provider, &api_key, &messages, &cancel, |text| {
         let _ = app.emit(
             "ai:chunk",
             serde_json::json!({ "jobId": id, "kind": kind, "text": text }),

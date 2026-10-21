@@ -66,6 +66,9 @@ pub struct DavBackend {
     cfg: DavConfig,
     password: String,
     base: String,
+    /// 批内已确认存在的目录前缀（MKCOL 结果缓存；坚果云等按请求频率配额，
+    /// 逐次重复 MKCOL 根链会白白消耗配额）
+    ensured_dirs: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl DavBackend {
@@ -74,16 +77,27 @@ impl DavBackend {
         if !(url.starts_with("https://") || url.starts_with("http://")) {
             return Err(AppError::new("sync_config", "服务器地址必须以 http(s):// 开头"));
         }
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| AppError::new("net", e.to_string()))?;
+        let client = crate::netcfg::apply_blocking(
+            reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .connect_timeout(Duration::from_secs(15)),
+            &crate::netcfg::load(),
+        )
+        .build()
+        .map_err(|e| AppError::new("net", e.to_string()))?;
         Ok(Self {
-            base: format!("{}/{}", url, cfg.remote_root.trim_matches('/')),
+            base: {
+                let root = cfg.remote_root.trim_matches('/');
+                if root.is_empty() {
+                    url.clone() // 同步到账户根：不带尾斜杠，避免 url_of 拼出 "//"
+                } else {
+                    format!("{url}/{root}")
+                }
+            },
             cfg,
             password,
             client,
+            ensured_dirs: std::cell::RefCell::new(std::collections::HashSet::new()),
         })
     }
 
@@ -136,15 +150,23 @@ fn map_net_err(e: reqwest::Error) -> AppError {
 
 impl StorageBackend for DavBackend {
     fn test_connection(&mut self) -> Result<TestResult, AppError> {
-        // 根路径 PROPFIND Depth:0：连通 + 鉴权一并验证
-        self.request(
+        // 根路径 PROPFIND Depth:0：连通 + 鉴权一并验证。
+        // 远端根尚未创建（新账户）→ 自动建根并如实回报——同步引擎同款行为，
+        // 否则测试按钮永远失败而实际同步能成功，误导用户
+        match self.request(
             "PROPFIND",
             &self.base.clone(),
             Some("0"),
             &[],
             Some(PROPFIND_BODY.as_bytes().to_vec()),
-        )?;
-        Ok(TestResult { ok: true, message: "连接成功".into() })
+        ) {
+            Ok(_) => Ok(TestResult { ok: true, message: "连接成功".into() }),
+            Err(e) if e.code == "not_found" => {
+                self.ensure_dir("")?;
+                Ok(TestResult { ok: true, message: "连接成功（远端目录不存在，已自动创建）".into() })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn list_all(&mut self) -> Result<Vec<RemoteEntry>, AppError> {
@@ -157,7 +179,16 @@ impl StorageBackend for DavBackend {
                 return Err(AppError::new("net", "远端条目数超过上限（疑似异常响应）"));
             }
             let url = if dir.is_empty() { self.base.clone() } else { self.url_of(&dir) };
-            let resp = self.request("PROPFIND", &url, Some("1"), &[], Some(PROPFIND_BODY.as_bytes().to_vec()))?;
+            let resp = match self.request("PROPFIND", &url, Some("1"), &[], Some(PROPFIND_BODY.as_bytes().to_vec())) {
+                Ok(r) => r,
+                // 远端根不存在（新账户未建目录）：自动建根后视同空远端——
+                // 否则首绑永远失败，用户被迫去网页端手工建目录
+                Err(e) if dir.is_empty() && e.code == "not_found" => {
+                    self.ensure_dir("")?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             let text = resp.text().map_err(|e| AppError::new("net", e.to_string()))?;
             for entry in parse_propfind(&text) {
                 // Depth:1 首个 response 是目录自身，跳过
@@ -223,16 +254,28 @@ impl StorageBackend for DavBackend {
         Ok(())
     }
 
+    /// 逐级 MKCOL 建目录链。**自服务器根起算**（含 remote_root 本身，如 writer/）：
+    /// 全新账户的远端根不存在时，仅靠根内相对路径建链必然 409——首绑必须能建根。
+    /// path 为相对 remote_root 的路径；空串 = 只建根。405 = 已存在视为成功。
     fn ensure_dir(&mut self, path: &str) -> Result<(), AppError> {
-        let segs: Vec<&str> = path.trim_matches('/').split('/').filter(|s| !s.is_empty()).collect();
-        // 逐级 MKCOL（405 = 已存在，视为成功）
+        let root = self.cfg.remote_root.trim_matches('/');
+        let rel = path.trim_matches('/');
+        let full = if rel.is_empty() { root.to_string() } else { format!("{root}/{rel}") };
+        let segs: Vec<&str> = full.split('/').filter(|s| !s.is_empty()).collect();
+        if segs.is_empty() {
+            return Ok(()); // 无远端根（同步到账户根）：无需建链
+        }
         for i in 0..segs.len() {
             let sub = segs[..=i].join("/");
+            if self.ensured_dirs.borrow().contains(&sub) {
+                continue;
+            }
+            let url = format!("{}/{}", self.cfg.url.trim_end_matches('/'), encode_path(&sub));
             let r = self
                 .client
                 .request(
                     reqwest::Method::from_bytes(b"MKCOL").unwrap(),
-                    self.url_of(&sub),
+                    &url,
                 )
                 .header("Authorization", self.auth_header())
                 .send();
@@ -243,6 +286,7 @@ impl StorageBackend for DavBackend {
                 }
                 Err(e) => return Err(map_net_err(e)),
             }
+            self.ensured_dirs.borrow_mut().insert(sub);
         }
         Ok(())
     }

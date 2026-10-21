@@ -294,11 +294,12 @@ setAiEditor({
     return { before, after, chapterStart };
   },
   chapterText: () => {
-    const pos = editor.state.selection.to;
-    const before = editor.state.doc.textBetween(0, pos, "\n");
+    // 光标所在章节：光标前文本中最近一个 H1 起至光标，从头起截 6000 字封顶
+    //（此前 textBetween 起点恒为 0 属笔误：长文拿到的是文档开头而非当前章节）
+    const before = editor.state.doc.textBetween(0, editor.state.selection.to, "\n");
     const h = before.lastIndexOf("\n# ");
-    const size = editor.state.doc.content.size;
-    return editor.state.doc.textBetween(h >= 0 ? 0 : 0, Math.min(size, 6000), "\n").slice(h >= 0 ? h : 0);
+    const start = h >= 0 ? h + 1 : 0;
+    return before.slice(start, start + 6000);
   },
   insertAtCursor: (md) => {
     editor
@@ -431,14 +432,16 @@ async function openExternalLink(href: string) {
   }
 }
 
-/** Shift+Tab：移除当前段行首的缩进（全角空格/半角空格各按字符计） */
+/** Shift+Tab：移除当前段行首的缩进（按实际缩进单位删，不得误删正文首字） */
 function removeLineIndent() {
   const { state } = editor;
   const { $from } = state.selection;
   const start = $from.start();
   const text = $from.parent.textContent;
   let cut = 0;
-  if (text.startsWith("　　") || text.startsWith("　") || text.startsWith("  ")) cut = 2;
+  if (text.startsWith("　　")) cut = 2;
+  else if (text.startsWith("　")) cut = 1; // 单全角空格 = 只删它自己
+  else if (text.startsWith("  ")) cut = 2;
   else if (text.startsWith(" ")) cut = 1;
   if (cut > 0) editor.chain().focus().deleteRange({ from: start, to: start + cut }).run();
 }

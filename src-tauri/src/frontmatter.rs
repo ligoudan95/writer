@@ -35,12 +35,13 @@ impl Frontmatter {
     }
 }
 
-/// 拆分 frontmatter 与正文；无 frontmatter 时返回 (None, 原文)
+/// 拆分 frontmatter 与正文；无 frontmatter 时返回 (None, 去 BOM 原文)
+///（BOM 必须剥在 split 内：否则加 fm 后 BOM 落进正文首行，重复保存也去不掉）
 pub fn split(content: &str) -> (Option<Frontmatter>, String) {
     let trimmed = content.trim_start_matches('\u{feff}');
     let rest = match trimmed.strip_prefix("---") {
         Some(r) => r,
-        None => return (None, content.to_string()),
+        None => return (None, trimmed.to_string()),
     };
     let rest = rest
         .strip_prefix("\r\n")
@@ -76,7 +77,7 @@ pub fn split(content: &str) -> (Option<Frontmatter>, String) {
         }
     }
     if !fm_valid {
-        return (None, content.to_string());
+        return (None, trimmed.to_string());
     }
     match body_from {
         Some(idx) => {
@@ -87,6 +88,6 @@ pub fn split(content: &str) -> (Option<Frontmatter>, String) {
                 .unwrap_or(body);
             (Some(fm), body)
         }
-        None => (None, content.to_string()), // 无闭合标记，视为普通正文
+        None => (None, trimmed.to_string()), // 无闭合标记，视为普通正文
     }
 }

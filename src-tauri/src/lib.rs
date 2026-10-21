@@ -6,6 +6,7 @@ mod db;
 mod docx_import;
 mod frontmatter;
 mod library;
+mod netcfg;
 mod pdf;
 mod secrets;
 mod sync;
@@ -393,6 +394,37 @@ fn sync_test(
     })
 }
 
+// -- 网络出口（M5.1：设置中心「网络」页；AI 与 WebDAV 共用） --------------------
+
+#[derive(Serialize, Clone)]
+struct NetConfigView {
+    mode: &'static str,
+    url: String,
+}
+
+#[tauri::command]
+fn net_config_get() -> CmdResult<NetConfigView> {
+    let cfg = netcfg::load();
+    Ok(NetConfigView { mode: cfg.mode.as_str(), url: cfg.url })
+}
+
+/// 保存后 AI 客户端热重建；WebDAV 客户端每批次新建、自动生效
+#[tauri::command]
+fn net_config_set(
+    aist: State<'_, Arc<ai::AiState>>,
+    mode: String,
+    url: String,
+) -> CmdResult<NetConfigView> {
+    let m = netcfg::ProxyMode::parse(&mode)
+        .ok_or_else(|| AppError::new("net_config", format!("未知代理模式：{mode}")))?;
+    let cfg = netcfg::NetConfig { mode: m, url: url.trim().to_string() };
+    netcfg::validate(&cfg)?;
+    netcfg::save(&cfg)?;
+    aist.rebuild(&cfg);
+    applog::info("", &format!("网络出口设置已更新：mode={}", cfg.mode.as_str()));
+    Ok(NetConfigView { mode: cfg.mode.as_str(), url: cfg.url })
+}
+
 #[derive(Serialize)]
 struct SyncRunAck {
     started: bool,
@@ -646,7 +678,7 @@ async fn ai_connectivity_test(
     } else {
         api_key
     };
-    match ai::fetch_models(&ai.client, &base_url, &key).await {
+    match ai::fetch_models(&ai.client(), &base_url, &key).await {
         Ok(_) => Ok(TestResult { ok: true, message: "连接成功".into() }),
         Err(e) => Ok(TestResult { ok: false, message: e.message }),
     }
@@ -665,7 +697,7 @@ async fn ai_models_fetch(
         .ok_or_else(|| AppError::new("not_found", "Provider 不存在"))?;
     let key = secrets::get(&ai::secrets_key(&p.id))?.unwrap_or_default();
     db.log_request(&p.name, 0, "models"); // 诊断审计面：模型拉取也是外发（不含内容）
-    ai::fetch_models(&ai.client, &p.base_url, &key).await
+    ai::fetch_models(&ai.client(), &p.base_url, &key).await
 }
 
 /// 发起 AI 作业（润色/续写/讨论共用）；结果经 ai:chunk/ai:done/ai:error/ai:cancelled 事件推送。
@@ -917,6 +949,8 @@ pub fn run() {
             import_doc,
             sync_config_get,
             sync_config_set,
+            net_config_get,
+            net_config_set,
             sync_test,
             sync_now,
             sync_status,

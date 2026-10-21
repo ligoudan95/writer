@@ -419,13 +419,9 @@ footer.statusbar {
 }
 .thirdparty-warn .icon-btn { margin-left: auto; }
 
-/* 同步设置面板（右侧浮层） */
+/* 同步设置（内嵌于设置中心「云同步」标签页） */
 .sync-settings {
-  position: fixed; top: 42px; right: 14px; z-index: 60;
-  width: min(430px, calc(100vw - 28px));
-  background: var(--bg-editor); border: 1px solid var(--border); border-radius: 12px;
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22);
-  padding: 12px 14px; font-size: 13px;
+  font-size: 13px;
 }
 .sync-head, .cv-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .sync-title { font-weight: 600; }
@@ -537,12 +533,9 @@ footer.statusbar {
   font-size: 12px; padding: 4px 12px; color: var(--fg);
 }
 
-/* AI 设置 */
+/* AI 设置（内嵌于设置中心「AI 接口」标签页） */
 .ai-settings {
-  position: fixed; top: 42px; right: 14px; z-index: 62;
-  width: min(480px, calc(100vw - 28px)); max-height: calc(100vh - 90px); overflow: auto;
-  background: var(--bg-editor); border: 1px solid var(--border); border-radius: 12px;
-  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22); padding: 12px 14px; font-size: 13px;
+  font-size: 13px;
 }
 .ai-head, .ai-title { display: flex; align-items: center; gap: 8px; }
 .ai-head { margin-bottom: 8px; }
@@ -700,6 +693,10 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
 .sd-row { display: flex; align-items: center; gap: 12px; font-size: 13px; }
 .sd-label { min-width: 200px; color: var(--fg-dim); }
 .sd-select { padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg); }
+.sd-input {
+  flex: 1; padding: 5px 9px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg); color: var(--fg); font-size: 13px;
+}
 .sd-note, .sd-sub { font-size: 12px; color: var(--fg-dim); line-height: 1.7; }
 .sd-list { border: 1px solid var(--border); border-radius: 6px; max-height: 160px; overflow-y: auto; }
 .sd-item { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 12px; border-bottom: 1px solid var(--border); }

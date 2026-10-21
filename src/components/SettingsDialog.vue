@@ -1,19 +1,23 @@
 <script setup lang="ts">
 /**
- * 设置中心（FR-SET-01）：外观 / 编辑器排版 / 备份与诊断 / 关于。
- * 同步与 AI 设置为独立面板（已有组件），此处入口跳转。
- * 应用级偏好（主题/排版）存 localStorage（应用作用域，跨库共享）。
+ * 设置中心（FR-SET-01）：AI 接口 / 云同步 / 网络 / 外观 / 编辑器排版 / 备份与诊断 / 关于。
+ * 接口配置（坚果云 WebDAV、AI Provider、代理出口）内嵌为标签页，不再散落浮层。
+ * 应用级偏好（主题/排版/网络出口）跨库共享；同步与 AI Provider 随文库存储。
  */
 import { onMounted, ref } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { s, setupPeriodicSync } from "../store";
-import { api } from "../api";
+import { api, type NetConfig } from "../api";
 import { theme, setTheme, type ThemeMode } from "../theme";
 import { layout, FONT_CANDIDATES, DEFAULT_LAYOUT } from "../layout";
 import { ai, toggleGlobal } from "../aiflow";
+import AiSettings from "./AiSettings.vue";
+import SyncSettings from "./SyncSettings.vue";
 
-const tab = ref<"appearance" | "editor" | "backup" | "about">("appearance");
+type Tab = "appearance" | "editor" | "ai" | "sync" | "network" | "backup" | "about";
+const props = defineProps<{ initialTab?: Tab }>();
+const tab = ref<Tab>(props.initialTab ?? "appearance");
 
 // 定时同步间隔（FR-SYN-03 可配置定时；分钟，0=关）
 const syncInterval = ref(Number(localStorage.getItem("writer.sync.interval") ?? 5));
@@ -21,6 +25,37 @@ function setIntervalMin(v: number) {
   syncInterval.value = v;
   localStorage.setItem("writer.sync.interval", String(v));
   setupPeriodicSync();
+}
+
+// -- 网络出口（M5.1） -----------------------------------------------------------
+const netMode = ref<NetConfig["mode"]>("direct");
+const netUrl = ref("");
+const netSaving = ref(false);
+const netMsg = ref("");
+
+onMounted(async () => {
+  try {
+    const cfg = await api.netConfigGet();
+    netMode.value = cfg.mode;
+    netUrl.value = cfg.url;
+  } catch {
+    /* 读取失败保持默认显示 */
+  }
+});
+
+async function saveNet() {
+  netSaving.value = true;
+  netMsg.value = "";
+  try {
+    const cfg = await api.netConfigSet(netMode.value, netUrl.value);
+    netMode.value = cfg.mode;
+    netUrl.value = cfg.url;
+    netMsg.value = "✓ 已保存：AI 请求立即走新出口，WebDAV 同步下次批次生效";
+  } catch (e) {
+    netMsg.value = `✗ 保存失败：${(e as { message?: string }).message ?? e}`;
+  } finally {
+    netSaving.value = false;
+  }
 }
 
 // -- 备份与诊断 ----------------------------------------------------------------
@@ -104,11 +139,57 @@ const emit = defineEmits<{ (e: "close"): void }>();
       </div>
       <div class="sd-body">
         <nav class="sd-nav">
+          <button :class="{ on: tab === 'ai' }" @click="tab = 'ai'">AI 接口</button>
+          <button :class="{ on: tab === 'sync' }" @click="tab = 'sync'">云同步</button>
+          <button :class="{ on: tab === 'network' }" @click="tab = 'network'">网络</button>
           <button :class="{ on: tab === 'appearance' }" @click="tab = 'appearance'">外观</button>
           <button :class="{ on: tab === 'editor' }" @click="tab = 'editor'">编辑器</button>
           <button :class="{ on: tab === 'backup' }" @click="tab = 'backup'">备份与诊断</button>
           <button :class="{ on: tab === 'about' }" @click="tab = 'about'">关于</button>
         </nav>
+
+        <!-- AI 接口（Provider 管理，内嵌面板） -->
+        <div v-if="tab === 'ai'" class="sd-pane">
+          <AiSettings />
+        </div>
+
+        <!-- 云同步（坚果云 / WebDAV，内嵌面板） -->
+        <div v-if="tab === 'sync'" class="sd-pane">
+          <SyncSettings />
+        </div>
+
+        <!-- 网络出口 -->
+        <div v-if="tab === 'network'" class="sd-pane">
+          <div class="sd-row">
+            <span class="sd-label">网络出口</span>
+            <div class="seg">
+              <button :class="{ on: netMode === 'direct' }" @click="netMode = 'direct'">直连</button>
+              <button :class="{ on: netMode === 'system' }" @click="netMode = 'system'">跟随系统代理</button>
+              <button :class="{ on: netMode === 'custom' }" @click="netMode = 'custom'">自定义代理</button>
+            </div>
+          </div>
+          <div v-if="netMode === 'custom'" class="sd-row">
+            <span class="sd-label">代理地址</span>
+            <input
+              v-model="netUrl"
+              class="sd-input"
+              placeholder="http://127.0.0.1:7890"
+            />
+          </div>
+          <div class="sd-row">
+            <button class="btn small primary" :disabled="netSaving" @click="saveNet">
+              {{ netSaving ? "保存中…" : "保存" }}
+            </button>
+            <span v-if="netMsg" :class="{ ok: netMsg.startsWith('✓') }" class="test-msg">{{ netMsg }}</span>
+          </div>
+          <div class="sd-note">
+            直连（默认）：不使用 Windows 系统代理。本机代理软件未运行时，系统代理会指向失效端口，
+            导致 AI 与云同步全部请求连接失败——直连可避免。访问国内接口（智谱、坚果云等）推荐直连。<br />
+            跟随系统代理：经 Windows 设置的代理出站（需代理软件正在运行）。<br />
+            自定义代理：所有 AI / WebDAV 请求经指定代理出站。<br />
+            本设置对 AI 请求立即生效；WebDAV 同步在下一个批次生效。
+          </div>
+        </div>
 
         <!-- 外观 -->
         <div v-if="tab === 'appearance'" class="sd-pane">
@@ -133,10 +214,6 @@ const emit = defineEmits<{ (e: "close"): void }>();
             </label>
           </div>
           <div class="sd-row">
-            <span class="sd-label">云同步</span>
-            <button class="btn small" @click="s.sync.settingsOpen = true; emit('close')">同步设置…</button>
-          </div>
-          <div class="sd-row">
             <span class="sd-label">定时同步间隔（长开时拉取对端更新）</span>
             <div class="seg">
               <button
@@ -152,10 +229,6 @@ const emit = defineEmits<{ (e: "close"): void }>();
           <div class="sd-row">
             <span class="sd-label">隐私</span>
             <span class="sd-sub">文档隐私标记在文档标题栏 🔒 与树中设置；标记后任何内容不外发</span>
-          </div>
-          <div class="sd-row">
-            <span class="sd-label">AI Provider</span>
-            <button class="btn small" @click="ai.settingsOpen = true; emit('close')">AI 设置…</button>
           </div>
         </div>
 

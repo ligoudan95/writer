@@ -23,12 +23,19 @@ pub fn docx_to_md(bytes: &[u8]) -> Result<String, AppError> {
     Ok(out)
 }
 
+/// 单条目解压上限（zip 炸弹防线：小压缩包可膨胀出超大 XML，无上限会 OOM）
+const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
 fn read_entry(zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str) -> Result<String, AppError> {
     let mut f = zip
         .by_name(name)
         .map_err(|_| AppError::new("import", "docx 缺少正文（word/document.xml）"))?;
     let mut s = String::new();
-    f.read_to_string(&mut s)?;
+    // take(cap+1)：多读 1 字节用于判定超限（截断在多字节字符中间会先报 UTF-8 错，同样拦下）
+    let n = std::io::Read::take(&mut f, MAX_ENTRY_BYTES + 1).read_to_string(&mut s)? as u64;
+    if n > MAX_ENTRY_BYTES {
+        return Err(AppError::new("import", "docx 内部 XML 过大（超过 64MB，疑似压缩炸弹）"));
+    }
     Ok(s)
 }
 

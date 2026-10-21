@@ -80,19 +80,14 @@ async function save() {
     saving.value = false;
   }
 }
-
-function close() {
-  s.sync.settingsOpen = false;
-}
 </script>
 
 <template>
   <div class="sync-settings">
     <div class="sync-head">
-      <span class="sync-title">云同步（WebDAV）</span>
+      <span class="sync-title">坚果云 / WebDAV 账户</span>
       <span style="flex: 1"></span>
       <button class="btn small" :disabled="!enabled" @click="triggerSync()">立即同步</button>
-      <button class="icon-btn" title="关闭" @click="close">✕</button>
     </div>
 
     <!-- 双引擎检测（FR-SYN-01） -->

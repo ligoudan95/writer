@@ -113,10 +113,9 @@ const KIND_LABEL: Record<string, string> = { polish: "润色", continue: "续写
 <template>
   <div class="ai-settings">
     <div class="ai-head">
-      <span class="ai-title">AI 能力（Provider 管理）</span>
+      <span class="ai-title">Provider 列表</span>
       <span style="flex: 1"></span>
       <button class="btn small ghost" @click="showLog = !showLog">请求日志</button>
-      <button class="icon-btn" title="关闭" @click="ai.settingsOpen = false">✕</button>
     </div>
 
     <!-- 首次配置数据流向说明（FR-AI-06 信任声明，一次性） -->

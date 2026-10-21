@@ -1,15 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from "vue";
+import { ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import DocTree from "./components/DocTree.vue";
 import EditorPane from "./components/EditorPane.vue";
 import StatusBar from "./components/StatusBar.vue";
-import SyncSettings from "./components/SyncSettings.vue";
 import ConflictView from "./components/ConflictView.vue";
 import DirectionAsk from "./components/DirectionAsk.vue";
-import AiSettings from "./components/AiSettings.vue";
 import ChatPanel from "./components/ChatPanel.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import NotificationCenter from "./components/NotificationCenter.vue";
@@ -33,8 +31,35 @@ import {
 const bootMsg = ref("正在启动…");
 const bootErr = ref("");
 const settingsOpen = ref(false);
+const settingsTab = ref<"appearance" | "editor" | "ai" | "sync" | "network" | "backup" | "about">("appearance");
 const trashOpen = ref(false);
 const helpOpen = ref(false);
+
+/** 打开设置中心（可指定接口配置标签页）。设置项已内嵌为标签页，
+ * 旧浮层入口（ai.settingsOpen / s.sync.settingsOpen）在此收敛路由 */
+function openSettings(tab?: typeof settingsTab.value) {
+  if (tab) settingsTab.value = tab;
+  settingsOpen.value = true;
+}
+
+watch(
+  () => ai.settingsOpen,
+  (v) => {
+    if (v) {
+      ai.settingsOpen = false;
+      openSettings("ai");
+    }
+  },
+);
+watch(
+  () => s.sync.settingsOpen,
+  (v) => {
+    if (v) {
+      s.sync.settingsOpen = false;
+      openSettings("sync");
+    }
+  },
+);
 
 let unlistenClose: (() => void) | null = null;
 
@@ -217,7 +242,7 @@ async function onKey(e: KeyboardEvent) {
     >☰</button>
     <div class="mid">
       <aside v-if="!sidebarHidden" class="sidebar" :style="{ width: sidebarW + 'px', flex: 'none' }">
-        <DocTree @open-trash="trashOpen = true" @open-settings="settingsOpen = true" />
+        <DocTree @open-trash="trashOpen = true" @open-settings="openSettings()" />
       </aside>
       <div
         v-if="!sidebarHidden"
@@ -239,26 +264,20 @@ async function onKey(e: KeyboardEvent) {
       </template>
     </div>
 
-    <!-- AI 设置面板（FR-AI-01） -->
-    <AiSettings v-if="ai.settingsOpen" />
-
-    <!-- 同步设置面板（FR-SYN-01） -->
-    <SyncSettings v-if="s.sync.settingsOpen" />
-
     <!-- 冲突对比视图（FR-SYN-04：非模态，主区上方浮层） -->
     <ConflictView />
 
     <!-- 首次绑定方向选择（FR-SYN-07：模态白名单） -->
     <DirectionAsk />
 
-    <!-- 设置中心 / 通知中心 / 回收站 / 帮助（M5） -->
-    <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
+    <!-- 设置中心（含 AI 接口 / 云同步 / 网络出口标签页）/ 通知中心 / 回收站 / 帮助（M5） -->
+    <SettingsDialog v-if="settingsOpen" :key="settingsTab" :initial-tab="settingsTab" @close="settingsOpen = false" />
     <NotificationCenter />
     <TrashPanel v-if="trashOpen" @close="trashOpen = false" />
     <HelpOverlay v-if="helpOpen" @close="helpOpen = false" />
 
     <StatusBar
-      @open-settings="settingsOpen = true"
+      @open-settings="openSettings()"
       @open-trash="trashOpen = true"
       @open-help="helpOpen = true"
     />

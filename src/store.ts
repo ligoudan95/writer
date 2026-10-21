@@ -88,6 +88,9 @@ export async function saveNow(): Promise<boolean> {
   s.saveState = "saving";
   try {
     const r = await api.writeDoc(cur.path, body, s.lastReadHash);
+    // await 期间文档可能已被切换（openDoc→flush 早退放行）：本次写入已成功落盘，
+    // 但 hash/状态归属新文档的管线，回写旧 hash 会让新文档下一轮保存假冲突
+    if (s.current?.path !== cur.path) return true;
     s.lastReadHash = r.hash;
     s.savedAt = r.savedAt;
     const stateAfterSave: string = s.saveState; // await 期间可能被并发置 dirty（TS 收窄失效场景）
@@ -102,6 +105,8 @@ export async function saveNow(): Promise<boolean> {
     scheduleAutoSync(); // FR-SYN-03：保存后 10s 去抖自动同步
     return true;
   } catch (e: unknown) {
+    // 失败状态同样不得落到已切换的新文档上
+    if (s.current?.path !== cur.path) return false;
     const err = e as { code?: string; message?: string };
     if (err?.code === "conflict") {
       s.saveState = "conflict";
@@ -119,8 +124,10 @@ export async function flush(): Promise<boolean> {
   clearTimeout(saveTimer);
   if (s.saveState === "dirty") return saveNow();
   if (s.saveState === "saving") {
+    // 等待在途保存真正结束（本地 IO 必然收敛）。不得改调 saveNow——
+    // 它对 saving 态早退 true，会让 flush 假装完成，放行文档切换造成 hash 串档
     await new Promise((r) => setTimeout(r, 50));
-    return saveNow();
+    return flush();
   }
   if (s.saveState === "conflict") return false;
   return true;

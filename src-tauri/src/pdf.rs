@@ -82,7 +82,14 @@ pub fn export_pdf(app: &AppHandle, title: &str, body: &str, dest: &str) -> Resul
         ready.wait(Duration::from_secs(60))?;
         state.loaded.store(true, Ordering::Release);
     } else {
+        // 已就绪，但窗口可能已被销毁（异常路径）：重建后必须重新等 ready，
+        // 否则新窗未完成加载就 eval 渲染，状态事件永不到达 → 挂满 300s 超时
+        let existed = app.get_webview_window("pdf-chamber").is_some();
         ensure_chamber(app)?;
+        if !existed {
+            let ready = EventWait::new(app, "pdf-chamber://ready")?;
+            ready.wait(Duration::from_secs(60))?;
+        }
     }
 
     let chamber = app

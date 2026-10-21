@@ -144,6 +144,13 @@ export interface AiRequestLog {
   kind: string;
 }
 
+// -- 网络出口（M5.1：AI 与 WebDAV 共用；默认直连绕过系统代理） ------------------
+
+export interface NetConfig {
+  mode: "direct" | "system" | "custom";
+  url: string;
+}
+
 const call = <T>(cmd: string, args?: Record<string, unknown>): Promise<T> =>
   invoke<T>(cmd, args);
 
@@ -239,4 +246,8 @@ export const api = {
   aiRequestLogClear: () => call<null>("ai_request_log_clear"),
   docSetPrivacy: (path: string, privacy: boolean) =>
     call<WriteResult>("doc_set_privacy", { path, privacy }),
+  // 网络出口（5.x 契约 net.* 域）
+  netConfigGet: () => call<NetConfig>("net_config_get"),
+  netConfigSet: (mode: NetConfig["mode"], url: string) =>
+    call<NetConfig>("net_config_set", { mode, url }),
 };
