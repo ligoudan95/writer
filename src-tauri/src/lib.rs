@@ -4,6 +4,7 @@ mod backup;
 mod dav;
 mod db;
 mod docx_import;
+mod epub;
 mod frontmatter;
 mod health;
 mod library;
@@ -531,6 +532,13 @@ async fn web_search(state: State<'_, AppState>, query: String) -> Result<Vec<web
     tauri::async_runtime::spawn_blocking(move || websearch::search_blocking(&root, &q))
         .await
         .map_err(|e| AppError::new("websearch", e.to_string()))?
+}
+
+// -- EPUB 导出（V1.3） ------------------------------------------------------------
+
+#[tauri::command]
+fn epub_export(title: String, chapters: Vec<epub::Chapter>, dest: String) -> CmdResult<()> {
+    Ok(epub::build(&title, &chapters, &dest)?)
 }
 
 // -- 敏感词/错别字检测（V1.3） ----------------------------------------------------
@@ -1195,6 +1203,7 @@ pub fn run() {
             web_search_config_set,
             web_search,
             lint_check,
+            epub_export,
             lint_custom_words,
             lint_set_custom_words,
             sync_test,

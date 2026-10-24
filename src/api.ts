@@ -272,6 +272,8 @@ export const api = {
   /** PDF 导出（FR-EXP-05）：渲染舱分页 + WebView2 PrintToPdf，返回成品路径 */
   pdfExport: (title: string, body: string, dest: string) =>
     call<string>("pdf_export", { title, body, dest }),
+  epubExport: (title: string, chapters: { title: string; html: string }[], dest: string) =>
+    call<null>("epub_export", { title, chapters, dest }),
   importRead: (path: string) => call<ImportedFile>("import_read", { path }),
   importDoc: (folder: string, filename: string, content: string) =>
     call<TreeNode>("import_doc", { folder, filename, content }),

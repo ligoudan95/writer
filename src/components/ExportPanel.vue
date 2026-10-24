@@ -8,7 +8,7 @@ import { exportTxt, exportMd, exportDocx, exportHtml, dedupeTitleH1 } from "../e
 import { exportTokens } from "../layout";
 import { mdToDoc, type PMNode } from "../codec";
 
-type Fmt = "txt" | "md" | "docx" | "pdf";
+type Fmt = "txt" | "md" | "docx" | "pdf" | "html" | "epub";
 // 导出记忆（FR-EXP-01）：跨会话持久化上次格式与目标路径 + 导出选项
 const fmt = ref<Fmt>((localStorage.getItem("writer.export.fmt") as Fmt) || "md");
 const crlf = ref(false);
@@ -77,7 +77,16 @@ const FORMATS: { id: Fmt; label: string }[] = [
   { id: "md", label: "Markdown" },
   { id: "docx", label: "Word" },
   { id: "pdf", label: "PDF" },
+  { id: "html", label: "HTML" },
+  { id: "epub", label: "EPUB" },
 ];
+
+/** 完整 HTML 文档（内联样式，浏览器直接打开） */
+function htmlFullDoc(title: string, bodyHtml: string): string {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title>` +
+    `<style>body{max-width:760px;margin:40px auto;padding:0 16px;font-family:"Microsoft YaHei",sans-serif;line-height:1.9;color:#26241f;}img{max-width:100%;}mark{background:#ffe08a;}table{border-collapse:collapse;}th,td{border:1px solid #ccc;padding:4px 10px;}blockquote{border-left:3px solid #b08552;margin:0.7em 1em;padding-left:0.8em;color:#6f6a5f;}</style>` +
+    `</head><body>${bodyHtml}</body></html>`;
+}
 
 async function doExport() {
   if (!s.current || busy.value) return;
@@ -101,6 +110,15 @@ async function doExport() {
       await api.pdfExport(
         s.current.title || base,
         exportHtml(json, lt, { cover: pdfCover.value, toc: pdfToc.value, title: s.current.title || base }),
+        target,
+      );
+    } else if (fmt.value === "html") {
+      const html = htmlFullDoc(s.current.title || base, exportHtml(json, lt));
+      await api.exportWrite(target, Array.from(new TextEncoder().encode(html)));
+    } else if (fmt.value === "epub") {
+      await api.epubExport(
+        s.current.title || base,
+        [{ title: s.current.title || base, html: exportHtml(json, lt) }],
         target,
       );
     } else {
@@ -231,6 +249,25 @@ async function exportMerged() {
     if (!target) return;
     if (fmt.value === "pdf") {
       await api.pdfExport(book, exportHtml(merged, lt, { cover: pdfCover.value, toc: pdfToc.value, title: book }), target);
+    } else if (fmt.value === "html") {
+      await api.exportWrite(target, Array.from(new TextEncoder().encode(htmlFullDoc(book, exportHtml(merged, lt)))));
+    } else if (fmt.value === "epub") {
+      // 章节化：每篇一章（标题已前置 H1，正文去重后入章）
+      const chapters: { title: string; html: string }[] = [];
+      let buf: PMNode[] = [];
+      let cur = "";
+      for (const n of parts) {
+        if (n.type === "heading" && Number(n.attrs?.level ?? 1) === 1 && cur) {
+          chapters.push({ title: cur, html: exportHtml({ type: "doc", content: buf } as PMNode, lt) });
+          buf = [];
+        }
+        if (n.type === "heading" && Number(n.attrs?.level ?? 1) === 1) {
+          cur = (n.content ?? []).map((t) => t.text ?? "").join("");
+        }
+        buf.push(n);
+      }
+      if (buf.length) chapters.push({ title: cur || book, html: exportHtml({ type: "doc", content: buf } as PMNode, lt) });
+      await api.epubExport(book, chapters, target);
     } else if (fmt.value === "docx") {
       await api.exportWrite(target, Array.from(await exportDocx(merged, lt)));
     } else if (fmt.value === "txt") {
