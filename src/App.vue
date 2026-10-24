@@ -11,6 +11,7 @@ import DirectionAsk from "./components/DirectionAsk.vue";
 import ChatPanel from "./components/ChatPanel.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import GlobalSearch from "./components/GlobalSearch.vue";
+import SplitPane from "./components/SplitPane.vue";
 import NotificationCenter from "./components/NotificationCenter.vue";
 import TrashPanel from "./components/TrashPanel.vue";
 import HelpOverlay from "./components/HelpOverlay.vue";
@@ -292,7 +293,13 @@ async function onKey(e: KeyboardEvent) {
             >✕</span>
           </button>
         </div>
-        <EditorPane />
+        <div class="mid-main">
+          <EditorPane />
+          <template v-if="s.splitDoc && !s.focusMode">
+            <div class="splitter" title="对照区" />
+            <SplitPane style="width: 42%; flex: none" />
+          </template>
+        </div>
       </main>
 
       <!-- AI 讨论侧栏（FR-AI-04）：可拖宽/关闭 -->

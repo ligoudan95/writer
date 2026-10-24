@@ -40,6 +40,8 @@ export const s = reactive({
   focusMode: localStorage.getItem("writer.focus") === "1",
   /** 多标签（V1.2，FR-EDT-08）：打开的文档页签（path 列表，当前为 current.path） */
   tabs: [] as string[],
+  /** 分屏对照（V1.3，FR-EDT-08 P2）：右侧只读对照文档路径（null = 关闭） */
+  splitDoc: null as string | null,
   // 云同步（FR-SYN，M3）
   sync: {
     phase: "idle" as string, // idle | scanning | planning | executing | settling

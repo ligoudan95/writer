@@ -214,6 +214,12 @@ async function onDrop(node: TreeNode, e: DragEvent) {
             >{{ node.starred ? "★" : "☆" }}</button
           >
           <button v-if="node.kind === 'doc'" class="icon-btn dim" title="标签" @click="editTags(node)">🏷</button>
+          <button
+            v-if="node.kind === 'doc'"
+            class="icon-btn dim"
+            title="分屏对照（右侧只读打开）"
+            @click="s.splitDoc = s.splitDoc === node.id ? null : node.id"
+          >⧉</button>
           <button class="icon-btn dim" title="重命名" @click="startRename(node)">✎</button>
           <button class="icon-btn dim" title="移入回收站" @click="deleteNode(node)">✕</button>
         </span>
