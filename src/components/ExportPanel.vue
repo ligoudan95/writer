@@ -25,6 +25,53 @@ watch(withFm, (v) => localStorage.setItem("writer.export.fm", v ? "1" : "0"));
 watch(pdfCover, (v) => localStorage.setItem("writer.export.pdfcover", v ? "1" : "0"));
 watch(pdfToc, (v) => localStorage.setItem("writer.export.pdftoc", v ? "1" : "0"));
 
+// 导出预设（FR-EXP-07）：常用参数组合一键存取（格式 + 全部选项）
+interface Preset {
+  name: string;
+  fmt: Fmt;
+  crlf: boolean;
+  bom: boolean;
+  withFm: boolean;
+  pdfCover: boolean;
+  pdfToc: boolean;
+}
+const presets = ref<Preset[]>(JSON.parse(localStorage.getItem("writer.export.presets") ?? "[]"));
+const presetName = ref("");
+function persistPresets() {
+  localStorage.setItem("writer.export.presets", JSON.stringify(presets.value));
+}
+function snapshot(): Preset {
+  return {
+    name: "",
+    fmt: fmt.value,
+    crlf: crlf.value,
+    bom: bom.value,
+    withFm: withFm.value,
+    pdfCover: pdfCover.value,
+    pdfToc: pdfToc.value,
+  };
+}
+function savePreset() {
+  const name = presetName.value.trim();
+  if (!name) return;
+  const p = { ...snapshot(), name };
+  presets.value = [...presets.value.filter((x) => x.name !== name), p];
+  persistPresets();
+  presetName.value = "";
+}
+function applyPreset(p: Preset) {
+  fmt.value = p.fmt;
+  crlf.value = p.crlf;
+  bom.value = p.bom;
+  withFm.value = p.withFm;
+  pdfCover.value = p.pdfCover;
+  pdfToc.value = p.pdfToc;
+}
+function deletePreset(name: string) {
+  presets.value = presets.value.filter((x) => x.name !== name);
+  persistPresets();
+}
+
 const FORMATS: { id: Fmt; label: string }[] = [
   { id: "txt", label: "TXT" },
   { id: "md", label: "Markdown" },
@@ -229,6 +276,23 @@ function frontmatterOf(title: string, uuid?: string, privacy?: boolean): string 
       <button class="icon-btn" title="关闭" @click="closeExport()">✕</button>
     </div>
     <div class="export-body">
+      <!-- 导出预设（FR-EXP-07） -->
+      <div v-if="presets.length" class="preset-row">
+        <button
+          v-for="p in presets"
+          :key="p.name"
+          class="tool"
+          :title="`应用预设：${p.fmt.toUpperCase()}${p.pdfCover ? ' +封面' : ''}${p.pdfToc ? ' +目录' : ''}`"
+          @click="applyPreset(p)"
+        >
+          {{ p.name }}
+          <span class="preset-del" title="删除预设" @click.stop="deletePreset(p.name)">✕</span>
+        </button>
+      </div>
+      <div class="preset-save">
+        <input v-model="presetName" placeholder="预设名（如 投稿用 PDF）" @keydown.enter.prevent="savePreset" />
+        <button class="btn small ghost" :disabled="!presetName.trim()" @click="savePreset">存为预设</button>
+      </div>
       <div class="fmt-row">
         <button
           v-for="f in FORMATS"
