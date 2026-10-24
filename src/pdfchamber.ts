@@ -24,6 +24,17 @@ h1 { font-size: 16pt; } h2 { font-size: 14pt; } h3 { font-size: 12.5pt; }
 p { margin: 0.25em 0; text-align: justify; }
 blockquote { margin: 0.7em 1em; padding-left: 0.8em; color: #6f6a5f; border-left: 2.5pt solid #b08552; }
 blockquote p { margin: 0.15em 0; }
+/* V1.2 PDF 高级排版：封面与目录 */
+.pdf-cover { page-break-after: always; text-align: center; padding-top: 38vh; }
+.pdf-cover .cover-title { font-size: 26pt; border: none; }
+.pdf-cover .cover-date { color: #6f6a5f; margin-top: 1.5em; font-size: 12pt; }
+.pdf-toc { page-break-after: always; }
+.pdf-toc .toc-title { border: none; }
+.pdf-toc ul { list-style: none; padding-left: 0; }
+.pdf-toc li { margin: 0.35em 0; font-size: 11.5pt; }
+.pdf-toc li.lv2 { padding-left: 1.6em; font-size: 10.5pt; }
+.pdf-toc a { text-decoration: none; color: inherit; }
+.pdf-toc a::after { content: leader('.') target-counter(attr(href), page); color: #6f6a5f; }
 ul, ol { margin: 0.4em 0; padding-left: 1.8em; }
 li { margin: 0.15em 0; }
 ul.task { list-style: none; padding-left: 0.3em; }

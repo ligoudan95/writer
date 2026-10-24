@@ -14,12 +14,16 @@ const fmt = ref<Fmt>((localStorage.getItem("writer.export.fmt") as Fmt) || "md")
 const crlf = ref(false);
 const bom = ref(localStorage.getItem("writer.export.bom") === "1"); // TXT UTF-8 BOM（FR-EXP-02）
 const withFm = ref(localStorage.getItem("writer.export.fm") === "1"); // MD 含 frontmatter（FR-EXP-03）
+const pdfCover = ref(localStorage.getItem("writer.export.pdfcover") === "1"); // V1.2 PDF 封面
+const pdfToc = ref(localStorage.getItem("writer.export.pdftoc") === "1"); // V1.2 PDF 目录
 const busy = ref(false);
 const lastPath = ref(localStorage.getItem("writer.export.lastPath") || "");
 
 watch(fmt, (v) => localStorage.setItem("writer.export.fmt", v));
 watch(bom, (v) => localStorage.setItem("writer.export.bom", v ? "1" : "0"));
 watch(withFm, (v) => localStorage.setItem("writer.export.fm", v ? "1" : "0"));
+watch(pdfCover, (v) => localStorage.setItem("writer.export.pdfcover", v ? "1" : "0"));
+watch(pdfToc, (v) => localStorage.setItem("writer.export.pdftoc", v ? "1" : "0"));
 
 const FORMATS: { id: Fmt; label: string }[] = [
   { id: "txt", label: "TXT" },
@@ -47,7 +51,11 @@ async function doExport() {
     if (!target) return;
     if (fmt.value === "pdf") {
       // 渲染舱管线（FR-EXP-05）：分页 + COM 打印在 Rust 侧完成；排版 token 内嵌正文
-      await api.pdfExport(s.current.title || base, exportHtml(json, lt), target);
+      await api.pdfExport(
+        s.current.title || base,
+        exportHtml(json, lt, { cover: pdfCover.value, toc: pdfToc.value, title: s.current.title || base }),
+        target,
+      );
     } else {
       let bytes: number[];
       if (fmt.value === "docx") {
@@ -114,7 +122,7 @@ async function exportFolder() {
         const safe = d.title.replace(/[\\/:*?"<>|]/g, "_");
         const target = `${dir}\\${safe}.${fmt.value}`;
         if (fmt.value === "pdf") {
-          await api.pdfExport(d.title, exportHtml(json, lt), target);
+          await api.pdfExport(d.title, exportHtml(json, lt, { cover: pdfCover.value, toc: pdfToc.value, title: d.title }), target);
         } else if (fmt.value === "docx") {
           await api.exportWrite(target, Array.from(await exportDocx(json, lt)));
         } else if (fmt.value === "txt") {
@@ -175,7 +183,7 @@ async function exportMerged() {
     });
     if (!target) return;
     if (fmt.value === "pdf") {
-      await api.pdfExport(book, exportHtml(merged, lt), target);
+      await api.pdfExport(book, exportHtml(merged, lt, { cover: pdfCover.value, toc: pdfToc.value, title: book }), target);
     } else if (fmt.value === "docx") {
       await api.exportWrite(target, Array.from(await exportDocx(merged, lt)));
     } else if (fmt.value === "txt") {
@@ -241,6 +249,10 @@ function frontmatterOf(title: string, uuid?: string, privacy?: boolean): string 
       <label v-if="fmt === 'md'" class="export-opt">
         <input v-model="withFm" type="checkbox" /> 包含 frontmatter（标题/编号/隐私标记）
       </label>
+      <template v-if="fmt === 'pdf'">
+        <label class="export-opt"><input v-model="pdfCover" type="checkbox" /> 封面页（书名 + 日期）</label>
+        <label class="export-opt"><input v-model="pdfToc" type="checkbox" /> 目录页（章节 + 页码）</label>
+      </template>
       <p class="export-hint">
         {{ fmt === "txt" ? "纯文本：剥离格式标记，保留标题与段落文字" : fmt === "md" ? "Markdown：标准方言直出（含表格/任务列表）" : fmt === "docx" ? "Word：内容保真排版（标题样式/列表/表格/引用）" : "PDF：A4 分页排版，含页码与文档标题页眉（离屏渲染舱）" }}
       </p>

@@ -173,8 +173,24 @@ function listHtml(n: PMNode): string {
 }
 
 /** HTML 正文片段（PDF 渲染舱消费）。传 lt 时内嵌与屏幕同源的排版样式（FR-UI-03） */
-export function exportHtml(doc: PMNode, lt?: ExportLayout): string {
+function escapeHtml(t: string): string {
+  return t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+export interface PdfOptions {
+  /** 封面页（书名居中大字 + 日期） */
+  cover?: boolean;
+  /** 目录页（H1/H2 列表 + target-counter 页码，Paged.js 渲染） */
+  toc?: boolean;
+  /** 文档标题（封面/目录用） */
+  title?: string;
+}
+
+export function exportHtml(doc: PMNode, lt?: ExportLayout, pdf?: PdfOptions): string {
   const out: string[] = [];
+  // 标题锚点（目录跳转用）：稳定序号
+  const anchorOf = (i: number) => `h-${i}`;
+  const tocItems: { lv: number; text: string; anchor: string }[] = [];
   if (lt) {
     out.push(
       `<style>.pm-body{font-family:${lt.fontFamily};font-size:${lt.fontSize}px;line-height:${lt.lineHeight};}` +
@@ -182,11 +198,40 @@ export function exportHtml(doc: PMNode, lt?: ExportLayout): string {
         `<div class="pm-body">`,
     );
   }
+  // 封面 + 目录（FR-EXP V1.2 高级排版；页码/页眉由渲染舱 @page 体系承担）
+  if (pdf?.cover) {
+    const d = new Date();
+    out.push(
+      `<section class="pdf-cover"><h1 class="cover-title">${escapeHtml(pdf.title ?? "无题")}</h1>` +
+        `<p class="cover-date">${d.getFullYear()} 年 ${d.getMonth() + 1} 月</p></section>`,
+    );
+  }
+  const headings: { lv: number; html: string }[] = [];
+  for (const n of doc.content ?? []) {
+    if (n.type === "heading") {
+      const lv = Math.min(Math.max(Number(n.attrs?.level ?? 1), 1), 6);
+      if (lv <= 2) tocItems.push({ lv, text: textOf(n), anchor: anchorOf(headings.length) });
+      headings.push({ lv, html: inlineHtml(n.content ?? []) });
+    } else {
+      headings.push({ lv: 0, html: "" });
+    }
+  }
+  if (pdf?.toc && tocItems.length) {
+    out.push(`<section class="pdf-toc"><h1 class="toc-title">目录</h1><ul>`);
+    for (const t of tocItems) {
+      out.push(
+        `<li class="lv${t.lv}"><a href="#${t.anchor}">${escapeHtml(t.text)}</a></li>`,
+      );
+    }
+    out.push(`</ul></section>`);
+  }
+  let k = 0;
   for (const n of doc.content ?? []) {
     switch (n.type) {
       case "heading": {
-        const lv = Math.min(Math.max(Number(n.attrs?.level ?? 1), 1), 6);
-        out.push(`<h${lv}>${inlineHtml(n.content ?? [])}</h${lv}>`);
+        const lv = headings[k].lv;
+        out.push(`<h${lv} id="${anchorOf(k)}">${headings[k].html}</h${lv}>`);
+        k++;
         break;
       }
       case "paragraph":
