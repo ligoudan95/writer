@@ -1,6 +1,6 @@
 /**
  * DocumentCodec 初版（3.2 M11 / 6.4 规范）
- * 方言：CommonMark + GFM（表格/任务列表/删除线）+ 高亮 ==（未实现）+ 下划线 <u> 直写
+ * 方言：CommonMark + GFM（表格/任务列表/删除线）+ 高亮 ==（V1.2）+ 下划线 <u> 直写
  * md ↔ ProseMirror(TipTap) JSON 双向转换，独立于编辑器实例（可无头使用）。
  */
 import { marked, type Token, type Tokens } from "marked";
@@ -20,6 +20,29 @@ export interface PMNode {
 // ---------------------------------------------------------------------------
 // md → ProseMirror JSON
 // ---------------------------------------------------------------------------
+
+// ==高亮== 内联扩展（方言成员）：marked 原生不支持，自定义 tokenizer；
+// 起始定界符后必须紧跟非空白（与 ** 语义一致），防误吞 "a == b == c"
+type HighlightToken = { type: "highlight"; raw: string; tokens: Token[] };
+const highlightExt = {
+  name: "highlight",
+  level: "inline" as const,
+  start(src: string) {
+    return src.indexOf("==");
+  },
+  tokenizer(this: { lexer: { inlineTokens: (src: string, tokens: Token[]) => Token[] } }, src: string): HighlightToken | undefined {
+    const m = /^==(?=[^\s=])([\s\S]*?\S)==/.exec(src);
+    if (!m) return undefined;
+    const token = {
+      type: "highlight",
+      raw: m[0],
+      tokens: [] as Token[],
+    } as HighlightToken;
+    this.lexer.inlineTokens(m[1], token.tokens);
+    return token;
+  },
+};
+marked.use({ extensions: [highlightExt] });
 
 export function mdToDoc(md: string): PMNode {
   const tokens = marked.lexer(md);
@@ -172,6 +195,9 @@ function inline(tokens: Token[], baseMarks: PMMark[] = []): PMNode[] {
         break;
       case "del":
         out.push(...inline((t as Tokens.Del).tokens ?? [], [...cur(), { type: "strike" }]));
+        break;
+      case "highlight":
+        out.push(...inline((t as unknown as HighlightToken).tokens ?? [], [...cur(), { type: "highlight" }]));
         break;
       case "codespan":
         out.push(textNode((t as Tokens.Codespan).text ?? "", [{ type: "code" }]));
@@ -464,6 +490,9 @@ function wrapByMarks(marks: PMMark[] | undefined, s: string): string {
         break;
       case "strike":
         out = `~~${out}~~`;
+        break;
+      case "highlight":
+        out = `==${out}==`;
         break;
       case "underline":
         out = `<u>${out}</u>`;

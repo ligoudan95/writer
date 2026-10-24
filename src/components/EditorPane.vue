@@ -4,6 +4,7 @@ import { Editor, EditorContent } from "@tiptap/vue-3";
 import StarterKit from "@tiptap/starter-kit";
 import { Table, TableRow, TableHeader, TableCell } from "@tiptap/extension-table";
 import { ImageNode } from "../image-node";
+import Highlight from "@tiptap/extension-highlight";
 
 // 表格节点扩展：列对齐（表级 align + 单元格 style）必须入 schema，
 // 否则 setContent 时未知属性被丢弃、往返丢对齐（FR-EDT-01 方言 / FR-EDT-09 合并）
@@ -87,6 +88,7 @@ const editor = new Editor({
     styledCell(TableHeader),
     styledCell(TableCell),
     ImageNode,
+    Highlight,
     AiDraft,
   ],
   editorProps: {
@@ -508,6 +510,7 @@ const t = reactive({
   italic: false,
   underline: false,
   strike: false,
+  highlight: false,
   code: false,
   link: false,
   h: 0,
@@ -525,6 +528,7 @@ function syncToolbarState() {
   t.italic = editor.isActive("italic");
   t.underline = editor.isActive("underline");
   t.strike = editor.isActive("strike");
+  t.highlight = editor.isActive("highlight");
   t.code = editor.isActive("code");
   t.link = editor.isActive("link");
   t.h = LEVELS.find((l) => editor.isActive("heading", { level: l })) ?? 0;
@@ -696,6 +700,7 @@ watch(
         <button class="tool it" :class="{ on: t.italic }" title="斜体（Ctrl+I）" @click="c().toggleItalic().run()">I</button>
         <button class="tool u" :class="{ on: t.underline }" title="下划线（Ctrl+U）" @click="c().toggleUnderline().run()">U</button>
         <button class="tool" :class="{ on: t.strike }" title="删除线" @click="c().toggleStrike().run()">S</button>
+        <button class="tool" :class="{ on: t.highlight }" title="高亮（==文本==）" @click="c().toggleHighlight().run()">🖍</button>
         <button class="tool" :class="{ on: t.code }" title="行内代码" @click="c().toggleCode().run()">‹›</button>
         <button class="tool" :class="{ on: t.link }" title="链接" @click="toggleLink">🔗</button>
         <span class="sep" />

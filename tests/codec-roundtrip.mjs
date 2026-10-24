@@ -124,6 +124,29 @@ expect(
   out3.includes("``` 行内代码含 `` 双反引号 ```"),
   out3,
 );
+// 高亮 ==文本== 往返（V1.2，FR-EDT-01 方言成员）
+{
+  const mdH = "段落，含==高亮文字==与普通文字。" + String.fromCharCode(10);
+  const docH = mdToDoc(mdH);
+  const marks = [];
+  (function walk(n) {
+    if (n.marks) marks.push(...n.marks.map((m) => m.type));
+    (n.content ?? []).forEach(walk);
+  })(docH);
+  expect("高亮标记被解析", marks.includes("highlight"), marks.join(","));
+  const back = docToMd(docH);
+  expect("高亮往返无损", back.includes("==高亮文字=="), back);
+  // == a ==（两侧空白）不得误判为高亮
+  const mdEq = "公式 a == b == c 成立。" + String.fromCharCode(10);
+  const docEq = mdToDoc(mdEq);
+  const eqMarks = [];
+  (function walk2(n) {
+    if (n.marks) eqMarks.push(...n.marks.map((m) => m.type));
+    (n.content ?? []).forEach(walk2);
+  })(docEq);
+  expect("比较运算符不误判高亮", !eqMarks.includes("highlight"), eqMarks.join(","));
+}
+
 expect("代码围栏并存不提前闭栏", docToMd(mdToDoc(md3)).split("~~~").length >= 2 || out3.includes("~~~~"), out3);
 expect("单元格竖线转义保留", out3.includes("含竖线\\|"), out3);
 expect("单元格 <br> 换行保留", out3.includes("与换行<br>第二行"), out3);

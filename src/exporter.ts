@@ -132,6 +132,7 @@ function inlineHtml(nodes: PMNode[]): string {
       if (marks.some((m) => m.type === "italic")) t = `<em>${t}</em>`;
       if (marks.some((m) => m.type === "underline")) t = `<u>${t}</u>`;
       if (marks.some((m) => m.type === "strike")) t = `<s>${t}</s>`;
+      if (marks.some((m) => m.type === "highlight")) t = `<mark>${t}</mark>`;
       const link = marks.find((m) => m.type === "link");
       out += link ? `<a href="${escAttr(String(link.attrs?.href ?? ""))}">${t}</a>` : t;
     } else if (n.type === "hardBreak") {
@@ -309,6 +310,7 @@ function runsOf(nodes: PMNode[]): (TextRun | ExternalHyperlink)[] {
         underline: has("underline") ? {} : undefined,
         strike: has("strike"),
         font: has("code") ? "Consolas" : undefined,
+        highlight: has("highlight") ? "yellow" : undefined,
       });
       const link = marks.find((m) => m.type === "link");
       if (link) {
