@@ -678,6 +678,7 @@ export async function initSync() {
         s.sync.running = false;
         s.sync.phase = "idle";
         s.sync.last = e.payload;
+        resetSyncRetry(); // FR-SYN-05：成功即复位退避
         await refreshTree();
         await reloadSyncStatus();
       }),
@@ -690,13 +691,26 @@ export async function initSync() {
       }),
     );
     unlistens.push(
-      await listen<{ message: string; libRoot?: string }>("sync:error", (e) => {
+      await listen<{ code?: string; message: string; libRoot?: string }>("sync:error", (e) => {
         if (e.payload.libRoot && e.payload.libRoot !== s.root) return;
         s.sync.running = false;
-        notify("sync", `同步失败：${e.payload.message}`, {
-          actionLabel: "同步历史",
-          action: () => void openSyncHistory(),
-        });
+        // FR-SYN-05：可重试错误（网络/超时/限流）自动退避补同步——同步为状态驱动，
+        // 离线期间的改动在网络恢复后随下一批次自动补齐，无需显式队列
+        const code = e.payload.code ?? "";
+        const retryable = ["", "net", "net_connect", "net_timeout", "sync_rate_limited"].includes(code);
+        if (retryable) {
+          const waitMin = scheduleSyncRetry();
+          const tip =
+            code === "sync_rate_limited"
+              ? `坚果云限流或流量超限（429/507），${waitMin} 分钟后自动重试；改动不会丢失，恢复后自动补同步`
+              : `网络暂不可用，${waitMin} 分钟后自动重试；离线期间的改动会在网络恢复后自动同步`;
+          notify("sync", tip);
+        } else {
+          notify("sync", `同步失败：${e.payload.message}`, {
+            actionLabel: "同步历史",
+            action: () => void openSyncHistory(),
+          });
+        }
       }),
     );
     unlistens.push(
@@ -747,4 +761,43 @@ export function setupPeriodicSync() {
       if (!s.sync.running && s.sync.autoSync) void triggerSync();
     }, minutes * 60_000);
   }
+}
+
+// ---------------------------------------------------------------------------
+// FR-SYN-05（V1.1）：失败退避重试 + 网络恢复自动补同步
+// 同步为状态驱动——离线改动无需显式入队，网络恢复后的首个批次自动补齐；
+// 这里只做"失败后何时自动再试"：指数退避（30s → 1m → 5m → 15m → 1h 封顶），
+// 成功或网络恢复事件即复位
+// ---------------------------------------------------------------------------
+let syncRetryAttempt = 0;
+let syncRetryTimer: number | undefined;
+const SYNC_BACKOFF_MIN = [0.5, 1, 5, 15, 60];
+
+function scheduleSyncRetry(): number {
+  const idx = Math.min(syncRetryAttempt, SYNC_BACKOFF_MIN.length - 1);
+  const waitMin = SYNC_BACKOFF_MIN[idx];
+  syncRetryAttempt++;
+  clearTimeout(syncRetryTimer);
+  syncRetryTimer = window.setTimeout(
+    () => {
+      if (!s.sync.running) void triggerSync();
+    },
+    waitMin * 60_000,
+  );
+  return waitMin;
+}
+
+function resetSyncRetry() {
+  syncRetryAttempt = 0;
+  clearTimeout(syncRetryTimer);
+}
+
+if (typeof window !== "undefined") {
+  // 网络恢复：立即补同步（FR-SYN-05 恢复语义）
+  window.addEventListener("online", () => {
+    if (s.ready) {
+      resetSyncRetry();
+      void triggerSync();
+    }
+  });
 }
