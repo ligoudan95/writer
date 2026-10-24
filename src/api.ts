@@ -160,6 +160,16 @@ export interface StatsSummary {
   weekTotal: number;
   monthTotal: number;
 }
+export interface WebResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+export interface WebSearchConfig {
+  provider: string;
+  url: string;
+  hasKey: boolean;
+}
 export interface PromptTemplate {
   id: number;
   name: string;
@@ -327,4 +337,9 @@ export const api = {
   promptDelete: (id: number) => call<null>("prompt_delete", { id }),
   promptImport: (json: string) => call<number>("prompt_import", { json }),
   promptExport: () => call<string>("prompt_export"),
+  // 联网搜索（FR-AI-07）
+  webSearchConfigGet: () => call<WebSearchConfig>("web_search_config_get"),
+  webSearchConfigSet: (provider: string, url: string, apiKey?: string) =>
+    call<WebSearchConfig>("web_search_config_set", { provider, url, apiKey }),
+  webSearch: (query: string) => call<WebResult[]>("web_search", { query }),
 };

@@ -2,11 +2,31 @@
 /** 跨文档全文搜索（FR-SEARCH-01，V1.1）：Ctrl+Shift+F 唤起；
  * ≥3 字 FTS5 trigram / ≤2 字 LIKE 回退（Rust 侧分流）；点击结果打开并定位 */
 import { nextTick, ref } from "vue";
-import { api, type SearchHit } from "../api";
+import { api, type SearchHit, type WebResult } from "../api";
 import { s, openDoc } from "../store";
+import { ai } from "../aiflow";
 
 const q = ref("");
 const hits = ref<SearchHit[]>([]);
+// 联网搜索（FR-AI-07，V1.2）：结果卡片不自动进入正文
+const webMode = ref(false);
+const webResults = ref<WebResult[] | null>(null);
+
+async function askAiAbout(r: WebResult) {
+  // 追问 AI 总结：以搜索结果为粘贴上下文打开讨论面板
+  ai.chat.pasteText = `${r.title}
+${r.url}
+${r.snippet}`;
+  ai.chat.contextMode = "paste";
+  emit("close");
+  ai.chatOpen = true;
+}
+
+function insertAsReference(list: WebResult[]) {
+  const md = list.map((r) => `- [${r.title}](${r.url})`).join(String.fromCharCode(10));
+  void import("../aiflow").then((m) => m.insertReplyToBody(md));
+  emit("close");
+}
 const searching = ref(false);
 const searched = ref(false);
 const inputEl = ref<HTMLInputElement | null>(null);
@@ -28,8 +48,18 @@ async function doSearch() {
   if (!query) return;
   searching.value = true;
   try {
-    hits.value = await api.searchQuery(query);
+    if (webMode.value) {
+      webResults.value = await api.webSearch(query);
+    } else {
+      hits.value = await api.searchQuery(query);
+    }
     searched.value = true;
+  } catch (e) {
+    webResults.value = null;
+    s.toast = { msg: `联网搜索失败：${(e as { message?: string }).message ?? e}` };
+    setTimeout(() => {
+      if (s.toast?.msg.startsWith("联网搜索失败")) s.toast = null;
+    }, 5000);
   } finally {
     searching.value = false;
   }
@@ -76,6 +106,13 @@ function markQuery(text: string, query: string): { t: string; hit: boolean }[] {
   return out;
 }
 
+function toggleWebMode() {
+  webMode.value = !webMode.value;
+  webResults.value = null;
+  hits.value = [];
+  searched.value = false;
+}
+
 function fmtPath(p: string) {
   return p.replace(/^docs\//, "").replace(/\.md$/, "");
 }
@@ -96,10 +133,32 @@ nextTick(() => inputEl.value?.focus());
           @keydown.enter.prevent="doSearch"
           @keydown.esc="emit('close')"
         />
-        <button v-if="q" class="icon-btn" title="清空" @click="q = ''; hits = []; searched = false">✕</button>
+        <button
+          class="icon-btn"
+          :class="{ on: webMode }"
+          :title="webMode ? '联网搜索中（点击切回本地）' : '切换为联网搜索（需配置 Provider）'"
+          :style="webMode ? 'color: var(--accent)' : ''"
+          @click="toggleWebMode"
+        >🌐</button>
+        <button v-if="q" class="icon-btn" title="清空" @click="q = ''; hits = []; webResults = null; searched = false">✕</button>
       </div>
       <div class="gs-results">
         <div v-if="searching" class="gs-empty">搜索中…</div>
+        <div v-else-if="webMode && webResults === null" class="gs-empty">联网搜索：输入关键词查询互联网（需先在 设置 → AI 接口 配置搜索 Provider）</div>
+        <div v-else-if="webMode && searched && !webResults?.length" class="gs-empty">没有找到「{{ q }}」的相关网页</div>
+        <template v-else-if="webMode && webResults?.length">
+          <div v-for="r in webResults" :key="r.url" class="gs-web">
+            <div class="gs-title-row">
+              <a :href="r.url" target="_blank" rel="noopener" class="gs-title">{{ r.title }}</a>
+            </div>
+            <div class="gs-snippet">{{ r.snippet }}</div>
+            <div class="gs-web-ops">
+              <button class="btn small ghost" @click="askAiAbout(r)">追问 AI 总结</button>
+              <button class="btn small ghost" @click="insertAsReference([r])">插入为参考资料</button>
+            </div>
+          </div>
+          <button class="btn small" @click="insertAsReference(webResults)">全部插入为参考资料</button>
+        </template>
         <div v-else-if="searched && !hits.length" class="gs-empty">没有匹配「{{ q }}」的文档</div>
         <button
           v-for="h in hits"

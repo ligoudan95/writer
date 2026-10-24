@@ -166,6 +166,29 @@ async function importTpl() {
   tplMsg.value = n > 0 ? `已导入 ${n} 个模板` : "无新模板（同名跳过）";
 }
 
+// 联网搜索 Provider（FR-AI-07）
+const webCfg = ref({ provider: "", url: "", hasKey: false });
+const webKey = ref("");
+const webMsg = ref("");
+onMounted(async () => {
+  try {
+    webCfg.value = await api.webSearchConfigGet();
+  } catch {
+    /* 库未就绪 */
+  }
+});
+async function saveWebCfg() {
+  try {
+    const r = await api.webSearchConfigSet(webCfg.value.provider, webCfg.value.url, webKey.value || undefined);
+    webCfg.value = { ...r };
+    webKey.value = "";
+    webMsg.value = "✓ 已保存";
+  } catch (e) {
+    webMsg.value = `✗ ${(e as { message?: string }).message ?? e}`;
+  }
+  setTimeout(() => (webMsg.value = ""), 3500);
+}
+
 const KIND_LABEL: Record<string, string> = { polish: "润色", continue: "续写", chat: "讨论" };
 </script>
 
@@ -239,6 +262,28 @@ const KIND_LABEL: Record<string, string> = { polish: "润色", continue: "续写
         <button class="btn small primary" @click="save()">保存</button>
         <button class="btn small ghost" @click="editing = null">取消</button>
         <span v-if="testMsg" :class="{ ok: testMsg.startsWith('✓') }" class="test-msg">{{ testMsg }}</span>
+      </div>
+    </div>
+
+    <!-- 联网搜索 Provider（FR-AI-07，V1.2） -->
+    <div class="ai-edit" style="margin-top: 10px">
+      <div class="ai-row">
+        <span class="lab" style="width: auto">联网搜索</span>
+        <select :value="webCfg.provider" style="width: 110px" @change="webCfg.provider = ($event.target as HTMLSelectElement).value">
+          <option value="">不启用</option>
+          <option value="tavily">Tavily</option>
+          <option value="bocha">博查</option>
+          <option value="custom">自定义</option>
+        </select>
+        <input v-model="webCfg.url" placeholder="端点（选 Tavily/博查自动填）" :disabled="!webCfg.provider || webCfg.provider === 'tavily' || webCfg.provider === 'bocha'" />
+      </div>
+      <div v-if="webCfg.provider" class="ai-row">
+        <span class="lab">API Key</span>
+        <input v-model="webKey" type="password" :placeholder="webCfg.hasKey ? '已保存（留空保持）' : '搜索服务 API Key'" />
+      </div>
+      <div class="ai-row actions" v-if="webCfg.provider">
+        <button class="btn small primary" @click="saveWebCfg">保存</button>
+        <span v-if="webMsg" class="test-msg" :class="{ ok: webMsg.startsWith('✓') }">{{ webMsg }}</span>
       </div>
     </div>
 

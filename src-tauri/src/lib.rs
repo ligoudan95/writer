@@ -12,6 +12,7 @@ mod pdf;
 mod prompts;
 mod search;
 mod stats;
+mod websearch;
 mod storage;
 mod secrets;
 mod sync;
@@ -490,6 +491,40 @@ fn prompt_import(state: State<AppState>, json: String) -> CmdResult<usize> {
 fn prompt_export(state: State<AppState>) -> CmdResult<String> {
     let root = lib_root_of(&state)?;
     Ok(prompts::export_json(&root)?)
+}
+
+// -- 联网搜索（FR-AI-07，V1.2） ---------------------------------------------------
+
+#[tauri::command]
+fn web_search_config_get(state: State<AppState>) -> CmdResult<websearch::WebSearchConfigView> {
+    let root = lib_root_of(&state)?;
+    Ok(websearch::config_view(&root))
+}
+
+#[tauri::command]
+fn web_search_config_set(
+    state: State<AppState>,
+    provider: String,
+    url: String,
+    apiKey: Option<String>,
+) -> CmdResult<websearch::WebSearchConfigView> {
+    let root = lib_root_of(&state)?;
+    Ok(websearch::set_config(&root, &provider, &url, apiKey.as_deref())?)
+}
+
+#[tauri::command]
+async fn web_search(state: State<'_, AppState>, query: String) -> Result<Vec<websearch::WebResult>, AppError> {
+    let root = {
+        let guard = state.lib.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(lib) = guard.as_ref() else {
+            return Err(AppError::new("no_library", "尚未打开文库"));
+        };
+        lib.root.clone()
+    };
+    let q = query.clone();
+    tauri::async_runtime::spawn_blocking(move || websearch::search_blocking(&root, &q))
+        .await
+        .map_err(|e| AppError::new("websearch", e.to_string()))?
 }
 
 // -- 库体检与修复（FR-DOC-07，V1.1） ---------------------------------------------
@@ -1122,6 +1157,9 @@ pub fn run() {
             prompt_delete,
             prompt_import,
             prompt_export,
+            web_search_config_get,
+            web_search_config_set,
+            web_search,
             sync_test,
             sync_now,
             sync_status,
