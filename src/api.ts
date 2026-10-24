@@ -149,6 +149,15 @@ export interface SearchHit {
   snippet: string;
   score: number;
 }
+export interface StatsSummary {
+  days: [string, number][];
+  today: number;
+  goal: number;
+  streak: number;
+  activeDays: number;
+  weekTotal: number;
+  monthTotal: number;
+}
 
 // -- 网络出口（M5.1：AI 与 WebDAV 共用；默认直连绕过系统代理） ------------------
 
@@ -259,4 +268,7 @@ export const api = {
   // 全文搜索（FR-SEARCH-01）
   searchQuery: (q: string) => call<SearchHit[]>("search_query", { q }),
   searchRebuild: () => call<number>("search_rebuild"),
+  // 写作目标与统计（FR-STAT-01/02）
+  statsSummary: () => call<StatsSummary>("stats_summary"),
+  statsSetGoal: (goal: number) => call<number>("stats_set_goal", { goal }),
 };

@@ -10,7 +10,7 @@ use std::path::Path;
 use rusqlite::Connection;
 
 use crate::frontmatter;
-use crate::library::{display_name_from_filename, AppError};
+use crate::library::AppError;
 
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct SearchHit {

@@ -1,10 +1,35 @@
 <script setup lang="ts">
-/** 状态栏：统计（含阅读时长/选区，FR-EDT-07）+ 同步指示 + 通知中心入口 + 主题/帮助 */
+/** 状态栏：统计（含阅读时长/选区，FR-EDT-07）+ 今日目标进度（FR-STAT-01）+ 同步指示 + 通知中心入口 + 主题/帮助 */
+import { onMounted, onBeforeUnmount, ref } from "vue";
 import { openSyncHistory, s } from "../store";
+import { api, type StatsSummary } from "../api";
 import { theme, setTheme } from "../theme";
 import { notifyCenter, openCenter } from "../notify";
+import StatsPanel from "./StatsPanel.vue";
 
 defineEmits<{ (e: "open-settings"): void; (e: "open-trash"): void; (e: "open-help"): void }>();
+
+// -- 今日写作进度（FR-STAT-01）：保存事件后刷新，点击打开统计面板 --------------
+const today = ref<StatsSummary | null>(null);
+const statsOpen = ref(false);
+let unSaved: (() => void) | null = null;
+async function refreshStats() {
+  try {
+    today.value = await api.statsSummary();
+  } catch {
+    today.value = null;
+  }
+}
+onMounted(async () => {
+  void refreshStats();
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    unSaved = await listen("doc:saved", () => void refreshStats());
+  } catch {
+    /* 事件接线失败不影响状态栏 */
+  }
+});
+onBeforeUnmount(() => unSaved?.());
 
 // -- 统计（FR-EDT-07：400 字/分钟阅读时长；选区统计由 EditorPane 写入 s.counts.sel*） ---
 const readMin = () => Math.max(1, Math.round(s.counts.words / 400));
@@ -64,6 +89,18 @@ const ACTION_LABEL: Record<string, string> = {
     <span v-if="s.counts.selWords" class="sb-item sel" title="选区统计">
       选区 {{ s.counts.selWords }} 字 / {{ s.counts.selChars }} 字符
     </span>
+
+    <!-- 今日写作进度（FR-STAT-01，点击打开统计面板） -->
+    <span
+      v-if="today"
+      class="sb-item sync-item"
+      title="今日写作进度（净增字数）· 点击查看统计"
+      @click="statsOpen = true"
+    >
+      🖋 {{ today.today }}/{{ today.goal }}
+      <span v-if="today.streak > 1" class="dim">·连{{ today.streak }}天</span>
+    </span>
+    <StatsPanel v-if="statsOpen" @close="statsOpen = false" />
 
     <!-- 同步状态（点击展开历史/入口） -->
     <span

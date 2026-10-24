@@ -9,6 +9,7 @@ mod library;
 mod netcfg;
 mod pdf;
 mod search;
+mod stats;
 mod secrets;
 mod sync;
 
@@ -71,6 +72,14 @@ fn library_startup(state: State<AppState>) -> CmdResult<StartupInfo> {
     {
         let root = lib.root.clone();
         std::thread::spawn(move || backup::maybe_daily_backup(&root));
+    }
+    // 统计基线全量刷新 + 本地聚合清单（FR-STAT-02：启动/日切时更新）
+    {
+        let root = lib.root.clone();
+        std::thread::spawn(move || {
+            let _ = stats::record_all(&root);
+            let _ = stats::refresh_manifest(&root);
+        });
     }
     let info = StartupInfo {
         root: lib.display_root.clone(),
@@ -146,7 +155,10 @@ fn doc_write(
     force: bool,
 ) -> CmdResult<WriteResult> {
     with_lib(&state, |lib| {
-        lib.write_doc(&app, &path, &body, &expected_hash, force)
+        let r = lib.write_doc(&app, &path, &body, &expected_hash, force)?;
+        // 统计基线（FR-STAT-02：保存时更新；失败不影响保存）
+        let _ = stats::record_doc_from_disk(&lib.root, &path);
+        Ok(r)
     })
 }
 
@@ -445,6 +457,20 @@ fn search_rebuild(state: State<AppState>) -> CmdResult<usize> {
     Ok(search::rebuild(&conn, &root)?)
 }
 
+// -- 写作目标与统计（FR-STAT-01/02，V1.1） ---------------------------------------
+
+#[tauri::command]
+fn stats_summary(state: State<AppState>) -> CmdResult<stats::StatsSummary> {
+    let root = lib_root_of(&state)?;
+    Ok(stats::summary(&root)?)
+}
+
+#[tauri::command]
+fn stats_set_goal(state: State<AppState>, goal: i64) -> CmdResult<i64> {
+    let root = lib_root_of(&state)?;
+    Ok(stats::set_goal(&root, goal)?)
+}
+
 #[derive(Serialize)]
 struct SyncRunAck {
     started: bool,
@@ -539,6 +565,8 @@ async fn sync_now(
                         .unwrap_or_else(|e| e.into_inner())
                         .extend(conflicts.iter().cloned());
                 }
+                // 统计基线全量刷新（FR-STAT-02：同步时更新——下载的新内容计入基线）
+                let _ = stats::record_all(&lib_root);
                 let _ = app.emit(
                     "sync:done",
                     tagged(serde_json::to_value(&report).unwrap_or_default(), &display_root2),
@@ -981,6 +1009,8 @@ pub fn run() {
             net_config_set,
             search_query,
             search_rebuild,
+            stats_summary,
+            stats_set_goal,
             sync_test,
             sync_now,
             sync_status,

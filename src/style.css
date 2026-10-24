@@ -788,3 +788,38 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
 .gs-snippet mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--fg); border-radius: 3px; padding: 0 1px; }
 .gs-empty { padding: 26px; text-align: center; color: var(--fg-dim); font-size: 13px; }
 .gs-foot { padding: 6px 14px; border-top: 1px solid var(--border); color: var(--fg-dim); font-size: 11px; }
+
+/* ===== V1.1：写作统计（FR-STAT-01/02） ===== */
+.stats-panel {
+  width: min(760px, 94vw); max-height: 86vh; display: flex; flex-direction: column;
+  background: var(--bg-editor); border: 1px solid var(--border); border-radius: 12px;
+  overflow: hidden;
+}
+.stats-body { padding: 18px 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.stat-today { display: flex; flex-direction: column; gap: 6px; }
+.stat-progress { height: 8px; border-radius: 4px; background: var(--bg); overflow: hidden; }
+.stat-progress-bar { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.4s; }
+.stat-progress-text { font-size: 13px; color: var(--fg-dim); }
+.stat-progress-text b { color: var(--fg); font-size: 15px; }
+.stat-done { color: #2e7d32; font-weight: 600; margin-left: 6px; }
+.stat-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.stat-card {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 6px;
+}
+.stat-card b { font-size: 17px; }
+.stat-card span { font-size: 11.5px; color: var(--fg-dim); }
+.stat-heat-wrap { display: flex; flex-direction: column; gap: 6px; }
+.stat-heat {
+  display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column;
+  grid-auto-columns: 11px; gap: 3px; overflow-x: auto; padding-bottom: 4px;
+}
+.heat-cell { width: 11px; height: 11px; border-radius: 2.5px; background: var(--bg); }
+.heat-cell.lv0 { background: color-mix(in srgb, var(--border) 45%, transparent); }
+.heat-cell.lv1 { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.heat-cell.lv2 { background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.heat-cell.lv3 { background: color-mix(in srgb, var(--accent) 80%, transparent); }
+.heat-cell.lv4 { background: var(--accent); }
+.heat-legend { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--fg-dim); }
+.stat-goal-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.stat-goal-row input { width: 100px; }

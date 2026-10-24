@@ -1570,21 +1570,37 @@ impl<'a> SyncEngine<'a> {
         }
     }
 
-    // -- 统计清单（应用独占，V1 无写入方：远端存在则收编） --------------------------
+    // -- 统计清单（应用独占，v1.7.1：并集合并，永不走冲突副本） --------------------
 
     fn settle_stats_manifest(&mut self, remote_files: &BTreeMap<String, RemoteEntry>) -> Result<(), AppError> {
-        if remote_files.contains_key(MANIFEST_STATS) {
+        let has_remote = remote_files.contains_key(MANIFEST_STATS);
+        let remote = if has_remote {
             let bytes = self.backend.get(MANIFEST_STATS)?;
-            let local_path = self.lib.root.join(MANIFEST_STATS);
-            let cur = fs::read(&local_path).unwrap_or_default();
-            if cur != bytes {
-                let _g = self.lib.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(parent) = local_path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                atomic_write(&local_path, &bytes)?;
-                self.report.downloaded += 1;
+            self.report.bytes_down += bytes.len() as u64;
+            serde_json::from_slice::<crate::stats::StatsManifest>(&bytes).unwrap_or_else(|e| {
+                self.warn(format!("远端统计清单损坏，视同空清单：{e}"));
+                crate::stats::StatsManifest::default()
+            })
+        } else {
+            crate::stats::StatsManifest::default()
+        };
+        // 本端基线已由批次入口的 record_all 刷新（sync_now 侧）；本地清单刷新后并集合并
+        let _ = crate::stats::refresh_manifest(&self.lib.root);
+        let local = crate::stats::load_manifest(&self.lib.root);
+        let merged = crate::stats::merge_manifest(&local, &remote);
+        let merged_bytes = serde_json::to_vec_pretty(&merged).unwrap_or_default();
+        let disk = fs::read(self.lib.root.join(MANIFEST_STATS)).unwrap_or_default();
+        let remote_bytes = serde_json::to_vec_pretty(&remote).unwrap_or_default();
+        if merged_bytes != disk {
+            let _g = self.lib.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(parent) = self.lib.root.join(MANIFEST_STATS).parent() {
+                let _ = fs::create_dir_all(parent);
             }
+            atomic_write(&self.lib.root.join(MANIFEST_STATS), &merged_bytes)?;
+        }
+        if merged_bytes != remote_bytes {
+            let _ = self.backend.put(MANIFEST_STATS, &merged_bytes)?;
+            self.report.bytes_up += merged_bytes.len() as u64;
         }
         Ok(())
     }
