@@ -931,3 +931,9 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
   color: var(--fg-dim); font-size: 12px; padding: 3px 6px; max-width: 33%;
 }
+
+/* ===== V1.3：跨文档替换 ===== */
+.gs-replace-bar { display: flex; gap: 8px; align-items: center; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.gs-replace-bar input { flex: 1; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 4px 8px; font-size: 12.5px; }
+.gs-hit.done { opacity: 0.55; }
+.gs-replace-ops { margin-top: 4px; }

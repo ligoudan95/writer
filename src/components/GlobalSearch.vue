@@ -143,6 +143,49 @@ function markQuery(text: string, query: string): { t: string; hit: boolean }[] {
   return out;
 }
 
+// 跨文档替换（FR-FND-02）：结果内替换，逐条确认；写经哈希护栏防覆盖他人修改
+const replaceMode = ref(false);
+const replaceWith = ref("");
+const replaced = ref<Set<string>>(new Set());
+const replacing = ref(false);
+
+async function replaceOne(h: SearchHit) {
+  if (replacing.value || replaced.value.has(h.path)) return;
+  replacing.value = true;
+  try {
+    const d = await api.readDoc(h.path);
+    const needle = q.value.trim().replace(/^"|"$/g, "");
+    if (!d.body.includes(needle)) {
+      // 内容已变（外部修改/过期索引）：跳过并提示
+      s.toast = { msg: `跳过 ${h.title}：命中处已不存在（可能已被修改）` };
+      setTimeout(() => (s.toast = null), 3500);
+      replaced.value.add(h.path);
+      return;
+    }
+    const body2 = d.body.split(needle).join(replaceWith.value);
+    await api.writeDoc(h.path, body2, d.hash);
+    replaced.value.add(h.path);
+  } catch (e) {
+    s.toast = { msg: `替换失败 ${h.title}：${(e as { message?: string }).message ?? e}` };
+    setTimeout(() => (s.toast = null), 4500);
+  } finally {
+    replacing.value = false;
+  }
+}
+
+function replaceAllPending() {
+  // 逐条顺序替换（每条独立哈希护栏与失败提示——FND-02 逐条确认语义）
+  for (const h of hits.value) {
+    if (!replaced.value.has(h.path)) void replaceOne(h);
+  }
+}
+
+function toggleReplaceMode() {
+  replaceMode.value = !replaceMode.value;
+  replaced.value = new Set();
+  replaceWith.value = "";
+}
+
 function toggleWebMode() {
   webMode.value = !webMode.value;
   webResults.value = null;
@@ -170,6 +213,14 @@ nextTick(() => inputEl.value?.focus());
           @keydown.enter.prevent="doSearch"
           @keydown.esc="emit('close')"
         />
+        <button
+          v-if="!webMode"
+          class="icon-btn"
+          :class="{ on: replaceMode }"
+          :title="replaceMode ? '替换模式中（点击退出）' : '跨文档替换（逐条确认）'"
+          :style="replaceMode ? 'color: var(--accent)' : ''"
+          @click="toggleReplaceMode"
+        >🔁</button>
         <button
           class="icon-btn"
           :class="{ on: webMode }"
@@ -214,10 +265,20 @@ nextTick(() => inputEl.value?.focus());
           <button class="btn small" @click="insertAsReference(webResults)">全部插入为参考资料</button>
         </template>
         <div v-else-if="searched && !hits.length" class="gs-empty">没有匹配「{{ q }}」的文档</div>
+        <!-- 跨文档替换（FR-FND-02） -->
+        <div v-if="replaceMode && hits.length" class="gs-replace-bar">
+          <span class="dim">将「{{ q }}」替换为</span>
+          <input v-model="replaceWith" placeholder="替换内容" @keydown.enter.prevent="replaceAllPending" />
+          <button class="btn small primary" :disabled="replacing || !replaceWith" @click="replaceAllPending">
+            逐条替换全部未处理项
+          </button>
+          <span class="dim">{{ replaced.size }}/{{ hits.length }} 已处理</span>
+        </div>
         <button
           v-for="h in hits"
           :key="h.path"
           class="gs-hit"
+          :class="{ done: replaced.has(h.path) }"
           @click="jump(h)"
         >
           <div class="gs-title-row">
@@ -229,6 +290,14 @@ nextTick(() => inputEl.value?.focus());
               <mark v-if="sg.hit">{{ sg.t }}</mark>
               <template v-else>{{ sg.t }}</template>
             </template>
+          </div>
+          <div v-if="replaceMode" class="gs-replace-ops">
+            <template v-if="replaced.has(h.path)">
+              <span class="dim">✓ 已替换</span>
+            </template>
+            <button v-else class="btn small" :disabled="replacing" @click.stop="replaceOne(h)">
+              替换此篇
+            </button>
           </div>
         </button>
       </div>
