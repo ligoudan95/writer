@@ -50,11 +50,7 @@ pub trait StorageBackend {
     fn mv(&mut self, from: &str, to: &str) -> Result<(), AppError>;
     fn delete(&mut self, path: &str) -> Result<(), AppError>;
     fn ensure_dir(&mut self, path: &str) -> Result<(), AppError>;
-    /// FR-SYN-06 同步加密钩子（V1 预留：恒等变换，V2 启用）
-    #[allow(dead_code)]
-    fn transform(&self, data: &[u8]) -> Vec<u8> {
-        data.to_vec()
-    }
+    // FR-SYN-06 同步加密钩子已随 V2.0 取消移除（v1.7.3 变更记录，2026-10-24）
 }
 
 // ---------------------------------------------------------------------------
