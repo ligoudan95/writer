@@ -107,6 +107,65 @@ async function togglePrivacy() {
   s.lastReadHash = r.hash;
 }
 
+// -- Prompt 模板管理（FR-AI-05） ---------------------------------------------------
+const tplEditing = ref<null | { id: number; name: string; category: string; content: string }>(null);
+const tplMsg = ref("");
+
+async function addTpl() {
+  tplEditing.value = { id: 0, name: "", category: "chat", content: "" };
+  tplMsg.value = "";
+}
+
+async function saveTpl() {
+  if (!tplEditing.value) return;
+  if (!tplEditing.value.name.trim() || !tplEditing.value.content.trim()) {
+    tplMsg.value = "名称与内容不能为空";
+    return;
+  }
+  try {
+    await api.promptSave({ ...tplEditing.value, isBuiltin: false });
+    tplEditing.value = null;
+    await reloadProviders();
+  } catch (e) {
+    tplMsg.value = (e as { message?: string }).message ?? String(e);
+  }
+}
+
+async function copyTpl(t: import("../api").PromptTemplate) {
+  await api.promptSave({ ...t, id: 0, name: t.name + "（副本）", isBuiltin: false });
+  await reloadProviders();
+}
+
+async function delTpl(t: import("../api").PromptTemplate) {
+  await api.promptDelete(t.id);
+  await reloadProviders();
+}
+
+async function exportTpl() {
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const dest = await save({
+    title: "导出 Prompt 模板",
+    defaultPath: "writer-prompt-templates.json",
+    filters: [{ name: "JSON", extensions: ["json"] }],
+  });
+  if (!dest) return;
+  const json = await api.promptExport();
+  await api.exportWrite(dest, Array.from(new TextEncoder().encode(json)));
+  s.toast = { msg: "模板已导出" };
+  setTimeout(() => (s.toast = null), 2500);
+}
+
+async function importTpl() {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = (await open({ multiple: false, filters: [{ name: "JSON", extensions: ["json"] }] })) as string | null;
+  if (!picked) return;
+  const { readTextFile } = await import("@tauri-apps/plugin-fs");
+  const json = await readTextFile(picked);
+  const n = await api.promptImport(json);
+  await reloadProviders();
+  tplMsg.value = n > 0 ? `已导入 ${n} 个模板` : "无新模板（同名跳过）";
+}
+
 const KIND_LABEL: Record<string, string> = { polish: "润色", continue: "续写", chat: "讨论" };
 </script>
 
@@ -180,6 +239,47 @@ const KIND_LABEL: Record<string, string> = { polish: "润色", continue: "续写
         <button class="btn small primary" @click="save()">保存</button>
         <button class="btn small ghost" @click="editing = null">取消</button>
         <span v-if="testMsg" :class="{ ok: testMsg.startsWith('✓') }" class="test-msg">{{ testMsg }}</span>
+      </div>
+    </div>
+
+    <!-- Prompt 模板（FR-AI-05） -->
+    <div class="ai-edit" style="margin-top: 10px">
+      <div class="ai-row">
+        <span class="lab" style="width: auto">Prompt 模板</span>
+        <span style="flex: 1"></span>
+        <button class="btn small ghost" @click="addTpl">＋新建</button>
+        <button class="btn small ghost" @click="importTpl">导入</button>
+        <button class="btn small ghost" @click="exportTpl">导出</button>
+      </div>
+      <div v-if="tplEditing" class="ai-edit" style="border: none; padding: 0">
+        <div class="ai-row">
+          <span class="lab">名称</span>
+          <input v-model="tplEditing.name" placeholder="如 梳理情节漏洞" />
+          <select v-model="tplEditing.category" style="flex: none; width: 90px">
+            <option value="polish">润色</option>
+            <option value="continue">续写</option>
+            <option value="chat">讨论</option>
+          </select>
+        </div>
+        <div class="ai-row">
+          <span class="lab">内容</span>
+          <textarea v-model="tplEditing.content" rows="2" placeholder="提示词正文（作用于所选类别）" style="flex: 1"></textarea>
+        </div>
+        <div class="ai-row actions">
+          <button class="btn small primary" @click="saveTpl">保存</button>
+          <button class="btn small ghost" @click="tplEditing = null">取消</button>
+          <span v-if="tplMsg" class="test-msg">{{ tplMsg }}</span>
+        </div>
+      </div>
+      <div class="ai-list">
+        <div v-for="t in ai.templates" :key="t.id" class="ai-prov" style="font-size: 12px">
+          <span class="ap-name">{{ t.name }}<span class="muted">（{{ t.category === "polish" ? "润色" : t.category === "continue" ? "续写" : "讨论" }}{{ t.isBuiltin ? "·内置" : "" }}）</span></span>
+          <span class="ap-url" :title="t.content">{{ t.content.slice(0, 40) }}</span>
+          <span style="flex: 1"></span>
+          <button v-if="t.isBuiltin" class="btn small ghost" title="复制为自定义模板" @click="copyTpl(t)">复制</button>
+          <button v-else class="btn small ghost" @click="tplEditing = { id: t.id, name: t.name, category: t.category, content: t.content }">编辑</button>
+          <button v-if="!t.isBuiltin" class="btn small ghost danger" @click="delTpl(t)">删除</button>
+        </div>
       </div>
     </div>
 

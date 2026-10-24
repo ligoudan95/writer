@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from "vue";
 import { ai, sendChat, insertReplyToBody, exportChatMd, defaultProvider, loadConversation, popLastUserMessage } from "../aiflow";
+
+// Prompt 模板快插（FR-AI-05）：讨论类模板一键入输入框
+const tplOpen = ref(false);
+const chatTemplates = () => ai.templates.filter((t) => t.category === "chat");
 import { api } from "../api";
 import { s } from "../store";
 
@@ -93,7 +97,22 @@ function retryChat() {
       {{ ai.chat.error }}
       <button class="btn small ghost" @click="retryChat">重试</button>
     </div>
+    <!-- Prompt 模板快插（FR-AI-05） -->
+    <div v-if="tplOpen" class="cp-tpl">
+      <button
+        v-for="t in chatTemplates()"
+        :key="t.id"
+        class="cp-tpl-item"
+        @click="input = t.content; tplOpen = false"
+      >{{ t.name }}</button>
+      <span v-if="!chatTemplates().length" class="cp-tpl-empty">暂无讨论类模板（设置 → AI 接口 → Prompt 模板）</span>
+    </div>
     <div class="cp-input">
+      <button
+        class="icon-btn"
+        title="Prompt 模板"
+        @click="tplOpen = !tplOpen"
+      >📋</button>
       <textarea
         v-model="input"
         rows="2"

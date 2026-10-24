@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { ai, POLISH_STYLES, applyPolish, resetPolish, startPolish, cancelRunning, defaultProvider } from "../aiflow";
+import { ai, polishOptions, applyPolish, resetPolish, startPolish, cancelRunning, defaultProvider } from "../aiflow";
 import { s } from "../store";
 
 const provider = () => defaultProvider();
@@ -20,7 +20,7 @@ const ctxChars = computed(() => ai.polish.original.length);
       <div class="pp-row">
         <label class="lab">风格</label>
         <select v-model="ai.polish.style">
-          <option v-for="st in POLISH_STYLES" :key="st.id" :value="st.id">{{ st.name }}</option>
+          <option v-for="st in polishOptions()" :key="st.id" :value="st.id">{{ st.name }}</option>
         </select>
       </div>
       <div class="pp-row">

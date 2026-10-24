@@ -160,6 +160,13 @@ export interface StatsSummary {
   weekTotal: number;
   monthTotal: number;
 }
+export interface PromptTemplate {
+  id: number;
+  name: string;
+  category: string;
+  content: string;
+  isBuiltin: boolean;
+}
 export interface HealthIssue {
   kind: string;
   path: string;
@@ -314,4 +321,10 @@ export const api = {
   backupListEntries: (name: string) => call<BackupEntry>("backup_list_entries", { name }),
   backupRestore: (name: string, restoreAll: boolean, selected: string[]) =>
     call<string[]>("backup_restore", { name, restoreAll, selected }),
+  // Prompt 模板（FR-AI-05）
+  promptList: () => call<PromptTemplate[]>("prompt_list"),
+  promptSave: (template: PromptTemplate) => call<PromptTemplate>("prompt_save", { template }),
+  promptDelete: (id: number) => call<null>("prompt_delete", { id }),
+  promptImport: (json: string) => call<number>("prompt_import", { json }),
+  promptExport: () => call<string>("prompt_export"),
 };

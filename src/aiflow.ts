@@ -68,6 +68,8 @@ export const ai = reactive({
   /** 全局 AI 开关（FR-AI-06：关闭后隐藏全部入口） */
   enabled: loadGlobalEnabled(),
   providers: [] as AiProvider[],
+  /** Prompt 模板（FR-AI-05，V1.2）：随库加载 */
+  templates: [] as import("./api").PromptTemplate[],
   settingsOpen: false,
   chatOpen: false,
   job: null as string | null,
@@ -230,6 +232,19 @@ export async function initAi() {
 
 export async function reloadProviders() {
   ai.providers = await api.aiProviderList();
+  try {
+    ai.templates = await api.promptList();
+  } catch {
+    ai.templates = [];
+  }
+}
+
+/** 润色样式选项 = 内置样式 + 润色类模板（FR-AI-05：模板即风格） */
+export function polishOptions(): { id: string; name: string; prompt: string }[] {
+  const tpl = ai.templates
+    .filter((t) => t.category === "polish")
+    .map((t) => ({ id: `tpl-${t.id}`, name: `📋 ${t.name}`, prompt: t.content }));
+  return [...POLISH_STYLES, ...tpl];
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +346,7 @@ export async function startPolish() {
   if (!sel || sel.text.trim().length < 2 || !p) return;
   if (!privacyGate("润色")) return; // A7：零发送
 
-  const style = POLISH_STYLES.find((x) => x.id === ai.polish.style) ?? POLISH_STYLES[0];
+  const style = polishOptions().find((x) => x.id === ai.polish.style) ?? POLISH_STYLES[0];
   const messages: ChatMsg[] = [
     { role: "system", content: "你是中文写作助手。只输出修改后的文字，不要解释、不要加引号。" },
     {

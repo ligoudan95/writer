@@ -9,6 +9,7 @@ mod health;
 mod library;
 mod netcfg;
 mod pdf;
+mod prompts;
 mod search;
 mod stats;
 mod storage;
@@ -457,6 +458,38 @@ fn search_rebuild(state: State<AppState>) -> CmdResult<usize> {
     let root = lib_root_of(&state)?;
     let conn = search::open(&root)?;
     Ok(search::rebuild(&conn, &root)?)
+}
+
+// -- Prompt 模板（FR-AI-05，V1.2） -----------------------------------------------
+
+#[tauri::command]
+fn prompt_list(state: State<AppState>) -> CmdResult<Vec<prompts::PromptTemplate>> {
+    let root = lib_root_of(&state)?;
+    Ok(prompts::list(&root)?)
+}
+
+#[tauri::command]
+fn prompt_save(state: State<AppState>, template: prompts::PromptTemplate) -> CmdResult<prompts::PromptTemplate> {
+    let root = lib_root_of(&state)?;
+    Ok(prompts::save(&root, &template)?)
+}
+
+#[tauri::command]
+fn prompt_delete(state: State<AppState>, id: i64) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    Ok(prompts::delete(&root, id)?)
+}
+
+#[tauri::command]
+fn prompt_import(state: State<AppState>, json: String) -> CmdResult<usize> {
+    let root = lib_root_of(&state)?;
+    Ok(prompts::import_json(&root, &json)?)
+}
+
+#[tauri::command]
+fn prompt_export(state: State<AppState>) -> CmdResult<String> {
+    let root = lib_root_of(&state)?;
+    Ok(prompts::export_json(&root)?)
 }
 
 // -- 库体检与修复（FR-DOC-07，V1.1） ---------------------------------------------
@@ -1084,6 +1117,11 @@ pub fn run() {
             storage_set_policy,
             backup_list_entries,
             backup_restore,
+            prompt_list,
+            prompt_save,
+            prompt_delete,
+            prompt_import,
+            prompt_export,
             sync_test,
             sync_now,
             sync_status,
