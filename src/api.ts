@@ -5,6 +5,8 @@ export interface TreeNode {
   name: string;
   kind: "folder" | "doc";
   privacy?: boolean;
+  starred?: boolean;
+  tags?: string[];
   children?: TreeNode[];
 }
 
@@ -261,6 +263,10 @@ export const api = {
   aiRequestLogClear: () => call<null>("ai_request_log_clear"),
   docSetPrivacy: (path: string, privacy: boolean) =>
     call<WriteResult>("doc_set_privacy", { path, privacy }),
+  docSetStar: (path: string, on: boolean) =>
+    call<WriteResult>("doc_set_star", { path, on }),
+  docSetTags: (path: string, tags: string[]) =>
+    call<WriteResult>("doc_set_tags", { path, tags }),
   // 网络出口（5.x 契约 net.* 域）
   netConfigGet: () => call<NetConfig>("net_config_get"),
   netConfigSet: (mode: NetConfig["mode"], url: string) =>

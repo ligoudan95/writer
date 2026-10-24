@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 文档树：选中/重命名/删除 + 拖拽（FR-DOC-02：拖到文件夹=移动；同级上下=排序，步长10） */
+/** 文档树：选中/重命名/删除 + 拖拽（FR-DOC-02）+ 收藏/标签（V1.1，frontmatter 随文件同步） */
 import { reactive, ref } from "vue";
 import { s, openDoc, deleteNode, renameDoc, renameFolder, refreshTree } from "../store";
 import { api, type TreeNode } from "../api";
@@ -45,6 +45,29 @@ function commitRename(node: TreeNode) {
 function onEnter(node: TreeNode, e: KeyboardEvent) {
   if (e.key === "Enter") commitRename(node);
   if (e.key === "Escape") editing.value = null;
+}
+
+// -- 收藏 / 标签（V1.1） ---------------------------------------------------------
+
+async function toggleStar(node: TreeNode) {
+  if (node.kind !== "doc") return;
+  const next = !node.starred;
+  const r = await api.docSetStar(node.id, next);
+  if (s.current?.path === node.id) s.lastReadHash = r.hash; // 标记重写文件，采纳新 hash
+  await refreshTree();
+}
+
+async function editTags(node: TreeNode) {
+  if (node.kind !== "doc") return;
+  const input = window.prompt(
+    "标签（逗号分隔，至多 8 个，随文件同步）",
+    (node.tags ?? []).join(","),
+  );
+  if (input === null) return;
+  const tags = input.split(/[,，]/).map((t) => t.trim()).filter(Boolean);
+  const r = await api.docSetTags(node.id, tags);
+  if (s.current?.path === node.id) s.lastReadHash = r.hash;
+  await refreshTree();
 }
 
 // -- 拖拽（FR-DOC-02） -----------------------------------------------------------
@@ -178,7 +201,19 @@ async function onDrop(node: TreeNode, e: DragEvent) {
           :title="syncMark(node.id)!.tip"
           >{{ syncMark(node.id)!.icon }}</span
         >
+        <span v-if="node.kind === 'doc' && node.tags?.length" class="treeitem-tags" :title="node.tags.join('、')">
+          <span v-for="t in node.tags.slice(0, 2)" :key="t" class="tree-tag">{{ t }}</span>
+          <span v-if="node.tags.length > 2" class="tree-tag more">+{{ node.tags.length - 2 }}</span>
+        </span>
         <span class="treeitem-ops" @click.stop>
+          <button
+            v-if="node.kind === 'doc'"
+            class="icon-btn dim"
+            :title="node.starred ? '取消收藏' : '收藏'"
+            @click="toggleStar(node)"
+            >{{ node.starred ? "★" : "☆" }}</button
+          >
+          <button v-if="node.kind === 'doc'" class="icon-btn dim" title="标签" @click="editTags(node)">🏷</button>
           <button class="icon-btn dim" title="重命名" @click="startRename(node)">✎</button>
           <button class="icon-btn dim" title="移入回收站" @click="deleteNode(node)">✕</button>
         </span>

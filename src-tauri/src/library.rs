@@ -133,6 +133,12 @@ pub struct TreeNode {
     /// 隐私标记（FR-AI-06 可视化：树形锁标）
     #[serde(default)]
     pub privacy: bool,
+    /// 收藏标记（V1.1：frontmatter starred，随文件同步）
+    #[serde(default)]
+    pub starred: bool,
+    /// 标签（V1.1：frontmatter tags 逗号标量，随文件同步）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<TreeNode>,
 }
@@ -763,6 +769,62 @@ impl Library {
         })
     }
 
+    /// 收藏标记（V1.1）：frontmatter starred 写入，随文件同步
+    pub fn set_star(&self, rel: &str, on: bool) -> CmdResult<WriteResult> {
+        self.set_fm_flag(rel, on, "starred")
+    }
+
+    /// 标签（V1.1）：frontmatter tags 逗号标量；逐个去逗号/截断，至多 8 个
+    pub fn set_tags(&self, rel: &str, tags: &[String]) -> CmdResult<WriteResult> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let path = self.resolve_doc(rel)?;
+        let bytes = fs::read(&path)?;
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        let (fm_opt, body) = frontmatter::split(&content);
+        let mut fm = fm_opt.unwrap_or_default();
+        let joined = tags
+            .iter()
+            .map(|t| t.replace(',', " ").trim().to_string())
+            .filter(|t| !t.is_empty())
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(",");
+        if joined.is_empty() {
+            fm.entries.retain(|(k, _)| k != "tags");
+        } else {
+            fm.set("tags", &joined);
+        }
+        let full = format!("{}\n{}", fm.render(), body);
+        atomic_write(&path, full.as_bytes())?;
+        Ok(WriteResult {
+            path: rel.to_string(),
+            hash: hash_str(full.as_bytes()),
+            saved_at: now_secs(),
+        })
+    }
+
+    /// 通用布尔 frontmatter 标记写入（starred 等；privacy 沿用既有 set_privacy）
+    fn set_fm_flag(&self, rel: &str, on: bool, key: &str) -> CmdResult<WriteResult> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let path = self.resolve_doc(rel)?;
+        let bytes = fs::read(&path)?;
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        let (fm_opt, body) = frontmatter::split(&content);
+        let mut fm = fm_opt.unwrap_or_default();
+        if on {
+            fm.set(key, "true");
+        } else {
+            fm.entries.retain(|(k, _)| k != key);
+        }
+        let full = format!("{}\n{}", fm.render(), body);
+        atomic_write(&path, full.as_bytes())?;
+        Ok(WriteResult {
+            path: rel.to_string(),
+            hash: hash_str(full.as_bytes()),
+            saved_at: now_secs(),
+        })
+    }
+
     pub fn write_doc(
         &self,
         app: &tauri::AppHandle,
@@ -930,6 +992,8 @@ impl Library {
             name: base,
             kind: "doc".into(),
             privacy: false,
+            starred: false,
+            tags: Vec::new(),
             children: vec![],
         })
     }
@@ -1004,6 +1068,8 @@ impl Library {
             name: doc_title,
             kind: "doc".into(),
             privacy: false,
+            starred: false,
+            tags: Vec::new(),
             children: vec![],
         })
     }
@@ -1100,6 +1166,8 @@ impl Library {
             name: base,
             kind: "folder".into(),
             privacy: false,
+            starred: false,
+            tags: Vec::new(),
             children: vec![],
         })
     }
@@ -1766,7 +1834,7 @@ fn walk_dir_inner(dir: &Path, prefix: &str, depth: usize) -> Vec<TreeNode> {
         return Vec::new();
     }
     let mut folders: Vec<TreeNode> = Vec::new();
-    let mut docs: Vec<(String, String, bool)> = Vec::new(); // (文件名, 显示名, 隐私)
+    let mut docs: Vec<(String, String, bool, bool, Vec<String>)> = Vec::new(); // (文件名, 显示名, 隐私, 收藏, 标签)
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return folders,
@@ -1789,6 +1857,8 @@ fn walk_dir_inner(dir: &Path, prefix: &str, depth: usize) -> Vec<TreeNode> {
                 name,
                 kind: "folder".into(),
                 privacy: false,
+                starred: false,
+                tags: Vec::new(),
                 children,
             });
         } else if name.to_lowercase().ends_with(".md") {
@@ -1799,23 +1869,44 @@ fn walk_dir_inner(dir: &Path, prefix: &str, depth: usize) -> Vec<TreeNode> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| display_name_from_filename(&name));
             let privacy = fm.as_ref().is_some_and(|f| is_privacy(f));
-            docs.push((name, display, privacy));
+            let starred = fm
+                .as_ref()
+                .and_then(|f| f.get("starred"))
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+                .unwrap_or(false);
+            let tags = fm
+                .as_ref()
+                .and_then(|f| f.get("tags"))
+                .map(|v| {
+                    v.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .take(8)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            docs.push((name, display, privacy, starred, tags));
         }
     }
     folders.sort_by(|a, b| natural_cmp(&a.name, &b.name));
     docs.sort_by(|a, b| natural_cmp(&a.0, &b.0));
     let mut out = folders;
-    out.extend(docs.into_iter().map(|(name, display, privacy)| TreeNode {
-        id: if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        },
-        name: display,
-        kind: "doc".into(),
-        privacy,
-        children: vec![],
-    }));
+    out.extend(
+        docs.into_iter()
+            .map(|(name, display, privacy, starred, tags)| TreeNode {
+                id: if prefix.is_empty() {
+                    name
+                } else {
+                    format!("{prefix}/{name}")
+                },
+                name: display,
+                kind: "doc".into(),
+                privacy,
+                starred,
+                tags,
+                children: vec![],
+            }),
+    );
     out
 }
 

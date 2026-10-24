@@ -837,6 +837,16 @@ fn ai_request_log_clear(state: State<AppState>) -> CmdResult<()> {
 
 /// 隐私标记（FR-AI-06）：写 frontmatter，随同步多端生效
 #[tauri::command]
+fn doc_set_star(state: State<AppState>, path: String, on: bool) -> CmdResult<WriteResult> {
+    with_lib(&state, |lib| lib.set_star(&path, on))
+}
+
+#[tauri::command]
+fn doc_set_tags(state: State<AppState>, path: String, tags: Vec<String>) -> CmdResult<WriteResult> {
+    with_lib(&state, |lib| lib.set_tags(&path, &tags))
+}
+
+#[tauri::command]
 fn doc_set_privacy(app: AppHandle, state: State<AppState>, path: String, privacy: bool) -> CmdResult<WriteResult> {
     let r = with_lib(&state, |lib| lib.set_privacy(&path, privacy))?;
     let _ = app.emit(
@@ -1034,6 +1044,8 @@ pub fn run() {
             ai_request_log,
             ai_request_log_clear,
             doc_set_privacy,
+            doc_set_star,
+            doc_set_tags,
             pdf::pdf_export,
             pdf::pdf_chamber_pull,
             force_exit
