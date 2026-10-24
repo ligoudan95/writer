@@ -45,6 +45,7 @@ import {
   consumePendingSessionPos,
 } from "../store";
 import { mdToDoc, docToMd, type PMNode } from "../codec";
+import { diffOps, opsToBlocks } from "../diff";
 import { AiDraft } from "../aidraft-mark";
 import {
   ai,
@@ -650,6 +651,14 @@ function diffLabel(words: number) {
   return "与当前相同";
 }
 
+// 快照 diff 视图（V1.2）：快照 vs 当前正文，块级增删预览
+const historyDiff = computed(() => {
+  if (!s.history.preview) return [];
+  const cur = s.current ? docToMd(stripDraftNodes(editor.getJSON() as unknown as PMNode)) : "";
+  const ops = diffOps(cur, s.history.preview);
+  return opsToBlocks(ops, 20);
+});
+
 async function onRestore(ts: number) {
   if (window.confirm("回滚到该快照？\n当前内容会先自动备份为「回滚前」快照，可再次回滚撤销。")) {
     await restoreSnapshot(ts);
@@ -828,6 +837,19 @@ watch(
           </div>
           <div v-if="!s.history.list.length" class="history-empty">
             暂无快照——每小时自动生成，或点上方"手动快照"
+          </div>
+        </div>
+        <div v-if="historyDiff.length" class="history-diff">
+          <div class="hd-head">与当前差异（<span class="ins">+新增</span> / <span class="del">-缺失</span>）</div>
+          <div class="hd-body">
+            <template v-for="(b, i) in historyDiff" :key="i">
+              <div v-if="b.before" class="hd-block del" :title="b.after ? '已修改（原文）' : '快照中有、当前没有'">
+                <pre>- {{ b.before }}</pre>
+              </div>
+              <div v-if="b.after" class="hd-block ins" :title="b.before ? '已修改（快照）' : '快照独有'">
+                <pre>+ {{ b.after }}</pre>
+              </div>
+            </template>
           </div>
         </div>
         <div v-if="s.history.preview" class="history-preview">
