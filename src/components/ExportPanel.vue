@@ -134,6 +134,70 @@ async function exportFolder() {
   }
 }
 
+/** FR-EXP-08 合并导出：文档树顺序合并为单一文件（MD/TXT 用 --- 分隔，
+ * DOCX/PDF 合并为单一 DocModel 经无头转换；每篇前置 H1 章节标题） */
+async function exportMerged() {
+  if (busy.value) return;
+  const folder = s.selectedFolder || "docs";
+  await refreshTree();
+  const collect = (nodes: typeof s.tree, inFolder: boolean): { path: string; title: string }[] => {
+    const out: { path: string; title: string }[] = [];
+    for (const n of nodes) {
+      if (n.kind === "folder") {
+        out.push(...collect(n.children ?? [], inFolder || n.id === folder));
+      } else if (inFolder || folder === "docs") {
+        out.push({ path: n.id, title: n.name });
+      }
+    }
+    return out;
+  };
+  const docs = collect(s.tree, false);
+  if (!docs.length) return;
+  busy.value = true;
+  try {
+    await flush();
+    const parts: PMNode[] = [];
+    const hr = { type: "horizontalRule" } as PMNode;
+    for (let i = 0; i < docs.length; i++) {
+      const d = docs[i];
+      const payload = await api.readDoc(d.path);
+      const json = dedupeTitleH1(mdToDoc(payload.body) as PMNode, d.title);
+      if (i > 0) parts.push(hr);
+      parts.push({ type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: d.title }] } as PMNode);
+      parts.push(...(json.content ?? []));
+    }
+    const merged = { type: "doc", content: parts } as PMNode;
+    const book = (folder === "docs" ? "整库合集" : folder.split("/").pop() ?? "合集").replace(/[\/:*?"<>|]/g, "_");
+    const lt = exportTokens();
+    const target = await save({
+      defaultPath: lastPath.value || `${book}.${fmt.value}`,
+      filters: [{ name: fmt.value.toUpperCase(), extensions: [fmt.value] }],
+    });
+    if (!target) return;
+    if (fmt.value === "pdf") {
+      await api.pdfExport(book, exportHtml(merged, lt), target);
+    } else if (fmt.value === "docx") {
+      await api.exportWrite(target, Array.from(await exportDocx(merged, lt)));
+    } else if (fmt.value === "txt") {
+      await api.exportWrite(target, encodeText(exportTxt(merged, crlf.value), bom.value));
+    } else {
+      await api.exportWrite(target, encodeText(exportMd(merged, ""), false));
+    }
+    lastPath.value = target;
+    localStorage.setItem("writer.export.lastPath", target);
+    s.toast = { msg: `已合并导出 ${docs.length} 篇 → ${target.split(/[\/]/).pop()}` };
+    setTimeout(() => (s.toast = null), 4000);
+    await revealItemInDir(target).catch(() => undefined);
+  } catch (e) {
+    s.toast = { msg: `合并导出失败：${(e as { message?: string }).message ?? e}` };
+    setTimeout(() => {
+      if (s.toast?.msg.startsWith("合并导出失败")) s.toast = null;
+    }, 6000);
+  } finally {
+    busy.value = false;
+  }
+}
+
 function encodeText(text: string, withBom: boolean): number[] {
   const prefix = withBom ? [0xef, 0xbb, 0xbf] : [];
   return [...prefix, ...new TextEncoder().encode(text)];
@@ -185,6 +249,9 @@ function frontmatterOf(title: string, uuid?: string, privacy?: boolean): string 
       </button>
       <button class="btn ghost" :disabled="busy" @click="exportFolder()">
         批量导出{{ s.selectedFolder ? "当前文件夹" : "整库" }}（{{ fmt.toUpperCase() }}）
+      </button>
+      <button class="btn ghost" :disabled="busy" @click="exportMerged()">
+        合并导出为单文件（{{ fmt.toUpperCase() }}，章节标题 + 分隔线）
       </button>
     </div>
   </div>
