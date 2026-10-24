@@ -92,6 +92,24 @@ const editor = new Editor({
     AiDraft,
   ],
   editorProps: {
+    // 粘贴清理（FR-IMP-02，V1.2）：默认合并格式（schema 白名单天然剥离背景色/
+    // 字体等冗余样式，此处再剥 script/style 与行内样式做纵深防御）；
+    // Ctrl+Shift+V 仅保留文本
+    transformPastedHTML(html: string): string {
+      return html
+        .replace(/<style[\s\S]*?<\/style>/gi, "")
+        .replace(/<script[\s\S]*?<\/script>/gi, "")
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/\s(?:style|class|width|height|bgcolor|color|face|size)="[^"]*"/gi, "");
+    },
+    handlePaste(_view: unknown, event: ClipboardEvent) {
+      if (!(event as ClipboardEvent & { shiftKey?: boolean }).shiftKey) return false;
+      const text = event.clipboardData?.getData("text/plain");
+      if (!text) return false;
+      event.preventDefault();
+      editor.chain().focus().insertContent(text).run();
+      return true;
+    },
     handleKeyDown(_view, event) {
       // AI 续写草稿态（FR-AI-03）：Tab 接受 / Esc 放弃（优先于缩进）；
       // 收起态 Tab = 取回（不能对已移除的区间走 accept，否则草稿文本静默丢失）
