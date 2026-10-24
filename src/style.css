@@ -924,3 +924,10 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
 .preset-del:hover { opacity: 1; color: #c0392b; }
 .preset-save { display: flex; gap: 6px; margin-bottom: 8px; }
 .preset-save input { flex: 1; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 4px 9px; font-size: 12.5px; }
+
+/* ===== V1.3：搜索过滤 ===== */
+.gs-filters { display: flex; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+.gs-filters select {
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+  color: var(--fg-dim); font-size: 12px; padding: 3px 6px; max-width: 33%;
+}

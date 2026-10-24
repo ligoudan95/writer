@@ -4,6 +4,7 @@
 import { nextTick, ref } from "vue";
 import { api, type SearchHit, type WebResult } from "../api";
 import { s, openDoc } from "../store";
+import { computed } from "vue";
 import { ai } from "../aiflow";
 
 const q = ref("");
@@ -32,6 +33,42 @@ const searched = ref(false);
 const inputEl = ref<HTMLInputElement | null>(null);
 const emit = defineEmits<{ (e: "close"): void }>();
 
+// 搜索过滤（FR-SEARCH-02）：文件夹 / 标签 / 时间范围
+const filterFolder = ref("");
+const filterTag = ref("");
+const filterDays = ref(0); // 0=不限 7/30/365
+const folders = computed(() => {
+  const byPath = (nodes: typeof s.tree): string[] => {
+    const out: string[] = [];
+    for (const n of nodes) {
+      if (n.kind === "folder") {
+        out.push(n.id);
+        out.push(...byPath(n.children ?? []));
+      }
+    }
+    return out;
+  };
+  return byPath(s.tree);
+});
+const allTags = computed(() => {
+  const set = new Set<string>();
+  const walk = (nodes: typeof s.tree) => {
+    for (const n of nodes) {
+      if (n.kind === "doc") n.tags?.forEach((t) => set.add(t));
+      if (n.children) walk(n.children);
+    }
+  };
+  walk(s.tree);
+  return [...set].sort();
+});
+function activeFilter() {
+  const f: import("../api").SearchFilter = {};
+  if (filterFolder.value) f.folder = filterFolder.value;
+  if (filterTag.value) f.tags = [filterTag.value];
+  if (filterDays.value > 0) f.since = Math.floor(Date.now() / 1000) - filterDays.value * 86400;
+  return Object.keys(f).length ? f : undefined;
+}
+
 let timer: number | undefined;
 function onInput() {
   clearTimeout(timer);
@@ -51,7 +88,7 @@ async function doSearch() {
     if (webMode.value) {
       webResults.value = await api.webSearch(query);
     } else {
-      hits.value = await api.searchQuery(query);
+      hits.value = await api.searchQuery(query, activeFilter());
     }
     searched.value = true;
   } catch (e) {
@@ -141,6 +178,23 @@ nextTick(() => inputEl.value?.focus());
           @click="toggleWebMode"
         >🌐</button>
         <button v-if="q" class="icon-btn" title="清空" @click="q = ''; hits = []; webResults = null; searched = false">✕</button>
+      </div>
+      <!-- 搜索过滤（FR-SEARCH-02） -->
+      <div v-if="!webMode" class="gs-filters">
+        <select v-model="filterFolder" @change="doSearch">
+          <option value="">全库</option>
+          <option v-for="f in folders" :key="f" :value="f">{{ f.replace("docs/", "") }}</option>
+        </select>
+        <select v-model="filterTag" @change="doSearch">
+          <option value="">全部标签</option>
+          <option v-for="t in allTags" :key="t" :value="t">#{{ t }}</option>
+        </select>
+        <select v-model="filterDays" @change="doSearch">
+          <option :value="0">不限时间</option>
+          <option :value="7">近 7 天</option>
+          <option :value="30">近 30 天</option>
+          <option :value="365">近一年</option>
+        </select>
       </div>
       <div class="gs-results">
         <div v-if="searching" class="gs-empty">搜索中…</div>

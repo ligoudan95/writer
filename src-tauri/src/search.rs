@@ -201,8 +201,72 @@ fn manual_snippet(body: &str, q: &str) -> (String, i64) {
     (buf, count)
 }
 
+#[derive(serde::Deserialize, Default, Debug, Clone)]
+pub struct SearchFilter {
+    /// 仅此文件夹内（库相对路径前缀，如 docs/卷一；空 = 全库）
+    #[serde(default)]
+    pub folder: String,
+    /// 含任一标签（fm tags 逗号标量；空 = 不过滤）
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 修改时间下限（unix 秒，0 = 不限）
+    #[serde(default)]
+    pub since: i64,
+    /// 修改时间上限（unix 秒，0 = 不限）
+    #[serde(default)]
+    pub until: i64,
+}
+
+/// 过滤判定（磁盘元数据 + 索引 fm 字段；reindex_one 已把 title 入索引，
+/// tags 存于原文 frontmatter——过滤时读盘一次 stat + fm，个人库规模毫秒级）
+fn pass_filter(root: &std::path::Path, rel: &str, f: &SearchFilter) -> bool {
+    if f.folder.is_empty() && f.tags.is_empty() && f.since <= 0 && f.until <= 0 {
+        return true;
+    }
+    if !f.folder.is_empty() && !rel.starts_with(&format!("{}/", f.folder.trim_end_matches('/'))) {
+        return false;
+    }
+    if f.since > 0 || f.until > 0 {
+        let Ok(m) = std::fs::metadata(root.join(rel)) else { return false; };
+        let mt = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if f.since > 0 && mt < f.since {
+            return false;
+        }
+        if f.until > 0 && mt > f.until {
+            return false;
+        }
+    }
+    if !f.tags.is_empty() {
+        let Ok(bytes) = std::fs::read(root.join(rel)) else { return false; };
+        let (fm, _) = frontmatter::split(&String::from_utf8_lossy(&bytes));
+        let doc_tags: Vec<&str> = fm
+            .as_ref()
+            .and_then(|f| f.get("tags"))
+            .map(|v| v.split(',').collect())
+            .unwrap_or_default();
+        if !f.tags.iter().any(|t| doc_tags.contains(&t.as_str())) {
+            return false;
+        }
+    }
+    true
+}
+
 /// 查询：引号包裹视为精确短语（trigram 短语即子串语义）。返回按相关度排序。
 pub fn query(conn: &Connection, q_raw: &str) -> Result<Vec<SearchHit>, AppError> {
+    query_filtered(conn, q_raw, &SearchFilter::default(), None)
+}
+
+pub fn query_filtered(
+    conn: &Connection,
+    q_raw: &str,
+    filter: &SearchFilter,
+    root: Option<&std::path::Path>,
+) -> Result<Vec<SearchHit>, AppError> {
     let q = q_raw.trim().trim_matches('"').to_string();
     if q.is_empty() {
         return Ok(vec![]);
@@ -229,6 +293,7 @@ pub fn query(conn: &Connection, q_raw: &str) -> Result<Vec<SearchHit>, AppError>
                 let t_hit = title.to_lowercase().contains(&q.to_lowercase());
                 SearchHit { path, title, snippet: s, score: n + if t_hit { 100 } else { 0 } }
             })
+            .filter(|h| root.map(|r| pass_filter(r, &h.path, filter)).unwrap_or(true))
             .collect();
         out.sort_by(|a, b| b.score.cmp(&a.score));
         return Ok(out);

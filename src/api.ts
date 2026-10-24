@@ -145,6 +145,12 @@ export interface AiRequestLog {
   chars: number;
   kind: string;
 }
+export interface SearchFilter {
+  folder?: string;
+  tags?: string[];
+  since?: number;
+  until?: number;
+}
 export interface SearchHit {
   path: string;
   title: string;
@@ -315,7 +321,8 @@ export const api = {
   netConfigSet: (mode: NetConfig["mode"], url: string) =>
     call<NetConfig>("net_config_set", { mode, url }),
   // 全文搜索（FR-SEARCH-01）
-  searchQuery: (q: string) => call<SearchHit[]>("search_query", { q }),
+  searchQuery: (q: string, filter?: SearchFilter) =>
+    call<SearchHit[]>("search_query", { q, filter }),
   searchRebuild: () => call<number>("search_rebuild"),
   // 写作目标与统计（FR-STAT-01/02）
   statsSummary: () => call<StatsSummary>("stats_summary"),

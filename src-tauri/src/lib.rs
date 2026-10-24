@@ -446,11 +446,16 @@ fn net_config_set(
 
 /// 跨文档搜索：查询前对账（增量重索引变更文件，自愈所有写入路径）
 #[tauri::command]
-fn search_query(state: State<AppState>, q: String) -> CmdResult<Vec<search::SearchHit>> {
+fn search_query(
+    state: State<AppState>,
+    q: String,
+    filter: Option<search::SearchFilter>,
+) -> CmdResult<Vec<search::SearchHit>> {
     let root = lib_root_of(&state)?;
     let conn = search::open(&root)?;
     search::reconcile(&conn, &root)?;
-    Ok(search::query(&conn, &q)?)
+    let f = filter.unwrap_or_default();
+    Ok(search::query_filtered(&conn, &q, &f, Some(&root))?)
 }
 
 /// 索引全量重建（库体检入口复用）
