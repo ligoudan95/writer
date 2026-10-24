@@ -113,6 +113,9 @@ export const ai = reactive({
     messages: [] as { role: string; content: string }[],
     streaming: false,
     streamText: "",
+    /** 思考流（V1.3.1）：思考模型 reasoning 增量累积；thinking=模型正处于思考阶段 */
+    thinkText: "",
+    thinking: false,
     contextMode: "none" as "none" | "selection" | "chapter" | "doc" | "paste",
     pasteText: "",
     error: "",
@@ -120,8 +123,6 @@ export const ai = reactive({
 
   /** 最近一次请求的上下文字符量（发送前预览口径，面板展示） */
   lastRequestChars: 0,
-  /** 思考模型进行中（V1.3.1）：jobId → 已思考字数（0/无 = 非思考期） */
-  thinking: {} as Record<string, number>,
 });
 
 export function defaultProvider(): AiProvider | null {
@@ -173,26 +174,24 @@ export async function initAi() {
           ai.cont.text += p.text;
           refreshDraft();
         } else if (p.kind === "chat" && p.jobId === ai.chat.jobId) {
+          ai.chat.thinking = false; // 首个正文 = 思考结束
           ai.chat.streamText += p.text;
         }
       }),
     );
     un.push(
-      await listen<{ jobId: string; kind: string; chars: number }>("ai:thinking", (e) => {
-        // 思考模型进度（GLM-5.3 等）：chars=0 表示思考结束进入正文
-        const p = e.payload;
-        if (p.chars === 0) {
-          delete ai.thinking[p.jobId];
-        } else {
-          ai.thinking[p.jobId] = p.chars;
-        }
+      await listen<{ jobId: string; kind: string; text: string }>("ai:thinking", (e) => {
+        // 思考流增量（仅讨论面板外显；润色/续写保持状态简化）
+        if (e.payload.kind !== "chat" || e.payload.jobId !== ai.chat.jobId) return;
+        ai.chat.thinkText += e.payload.text;
+        ai.chat.thinking = true;
       }),
     );
     un.push(
       await listen<{ jobId: string; kind: string; content: string }>("ai:done", (e) => {
         const p = e.payload;
         // jobId 门控：切换文档/新作业后到达的陈旧事件不得污染当前状态
-        delete ai.thinking[p.jobId];
+        ai.chat.thinking = false;
         if (p.kind === "polish" && p.jobId === ai.polish.jobId) onPolishDone(p.content);
         else if (p.kind === "continue" && p.jobId === ai.cont.jobId) onContinueDone();
         else if (p.kind === "chat" && p.jobId === ai.chat.jobId) onChatDone(p.content);
@@ -202,7 +201,7 @@ export async function initAi() {
       await listen<{ jobId: string; kind: string; code: string; message: string }>("ai:error", (e) => {
         const p = e.payload;
         const msg = `[${p.code}] ${p.message}`;
-        delete ai.thinking[p.jobId];
+        ai.chat.thinking = false;
         if (p.kind === "polish" && p.jobId === ai.polish.jobId) {
           ai.polish.state = "idle";
           ai.polish.error = msg;
@@ -229,7 +228,7 @@ export async function initAi() {
         // 按 kind + jobId 收尾：迟到的取消事件不得复位新作业的状态
         //（cancelled 在流循环收到下一个 SSE 项时才发出，可晚于新作业启动数秒）
         const p = e.payload;
-        delete ai.thinking[p.jobId];
+        ai.chat.thinking = false;
         if (p.kind === "polish" && p.jobId === ai.polish.jobId && ai.polish.state === "running") {
           ai.polish.state = "idle";
         } else if (p.kind === "continue" && p.jobId === ai.cont.jobId && ai.cont.state === "running") {
@@ -314,6 +313,8 @@ export function resetAiForDocSwitch() {
   ai.cont.error = "";
   ai.chat.streaming = false;
   ai.chat.streamText = "";
+  ai.chat.thinkText = "";
+  ai.chat.thinking = false;
   ai.chat.error = "";
 }
 
@@ -645,6 +646,8 @@ export async function sendChat(text: string): Promise<boolean> {
   await api.aiMessageAppend(ai.chat.convId, "user", text);
   ai.chat.streaming = true;
   ai.chat.streamText = "";
+  ai.chat.thinkText = "";
+  ai.chat.thinking = false;
   ai.chat.error = "";
   const messages: ChatMsg[] = [
     { role: "system", content: "你是写作讨论助手，回答简洁、贴合创作语境。" },
@@ -674,6 +677,7 @@ export function popLastUserMessage() {
 
 function onChatDone(content: string) {
   ai.chat.streaming = false;
+  ai.chat.thinking = false; // thinkText 保留展示，下次发送时清
   ai.chat.messages.push({ role: "assistant", content });
   ai.chat.streamText = "";
   void api.aiMessageAppend(ai.chat.convId, "assistant", content);

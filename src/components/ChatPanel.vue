@@ -44,6 +44,8 @@ async function scrollBottom() {
 
 onMounted(scrollBottom);
 watch(() => ai.chat.messages.length, scrollBottom);
+// 思考流/正文流增长均跟随滚动（V1.3.1）
+watch(() => [ai.chat.streamText, ai.chat.thinkText], scrollBottom);
 watch(
   () => s.current?.path,
   () => {
@@ -99,10 +101,18 @@ function retryChat() {
           <button class="btn small ghost" title="存为灵感便签（P2）" @click="createNote(m.content)">存为便签</button>
         </div>
       </div>
+      <!-- 思考过程（V1.3.1）：流式外显，思考中展开+呼吸指示，完成后折叠可回看 -->
+      <div v-if="ai.chat.thinkText" class="cp-think-box" :class="{ live: ai.chat.thinking }">
+        <details :open="ai.chat.thinking">
+          <summary>
+            <span v-if="ai.chat.thinking" class="cp-thinking-dot" />
+            {{ ai.chat.thinking ? "思考中…" : "思考过程" }}
+            <span class="muted">{{ ai.chat.thinkText.length }} 字</span>
+          </summary>
+          <pre>{{ ai.chat.thinkText }}</pre>
+        </details>
+      </div>
       <div v-if="ai.chat.streaming" class="cp-msg assistant">
-        <div v-if="ai.thinking[ai.chat.jobId]" class="cp-thinking">
-          <span class="cp-thinking-dot" /> 思考中…已思考 {{ ai.thinking[ai.chat.jobId] }} 字
-        </div>
         <div class="cpm-body streaming">{{ ai.chat.streamText || "…" }}</div>
       </div>
       <div v-if="!ai.chat.messages.length && !ai.chat.streaming" class="cp-empty">
@@ -137,7 +147,7 @@ function retryChat() {
         @keydown.ctrl.enter.prevent="send"
       ></textarea>
       <button class="btn small primary" :disabled="ai.chat.streaming || !defaultProvider()" @click="send">
-        {{ ai.chat.streaming ? (ai.thinking[ai.chat.jobId] ? "思考中…" : "回复中…") : "发送" }}
+        {{ ai.chat.streaming ? (ai.chat.thinking ? "思考中…" : "回复中…") : "发送" }}
       </button>
     </div>
   </aside>

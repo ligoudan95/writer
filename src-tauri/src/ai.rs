@@ -309,11 +309,11 @@ pub async fn run_chat_job(
                 serde_json::json!({ "jobId": id, "kind": kind, "text": text }),
             );
         },
-        // 思考进度（GLM-5.3 等思考模型）：节流后回调，外显"思考中"指示
-        Some(Box::new(move |chars: u64| {
+        // 思考流（GLM-5.3 等思考模型）：文本增量外显（chat_once 侧已 300ms 批聚）
+        Some(Box::new(move |text: &str| {
             let _ = app2.emit(
                 "ai:thinking",
-                serde_json::json!({ "jobId": id2, "kind": kind2, "chars": chars }),
+                serde_json::json!({ "jobId": id2, "kind": kind2, "text": text }),
             );
         })),
     )
@@ -351,7 +351,7 @@ async fn chat_once(
     messages: &[ChatMsg],
     cancel: &AtomicBool,
     mut emit_chunk: impl FnMut(&str),
-    mut on_thinking: Option<Box<dyn FnMut(u64) + Send>>,
+    mut on_thinking: Option<Box<dyn FnMut(&str) + Send>>,
 ) -> Result<String, AppError> {
     // 发起请求前先查取消（零网络发送，FR-AI-08）
     if cancel.load(Ordering::Acquire) {
@@ -402,9 +402,9 @@ async fn chat_once(
     let mut full = String::new();
     let mut batch = String::new();
     let mut last_flush = Instant::now();
-    let mut reasoning_chars: u64 = 0;
-    let mut thinking_emitted = false; // 首个思考增量立即外显（用户感知），其后 1s 节流
-    let mut last_thinking_emit = Instant::now();
+    let mut reasoning_batch = String::new();
+    let mut thinking_emitted = false; // 首个思考增量立即外显（用户感知），其后 300ms 批聚
+    let mut last_thinking_flush = Instant::now();
     let mut cancelled = false;
     loop {
         // 空闲看门狗：120s 无任何字节（含思考流）= 断连
@@ -429,24 +429,25 @@ async fn chat_once(
             }
             // 思考增量：计入指示器（1s 节流外显），不进正文
             if let Some(r) = parse_reasoning(&payload) {
-                reasoning_chars += r.chars().count() as u64;
-                if !thinking_emitted || last_thinking_emit.elapsed() >= Duration::from_secs(1) {
+                reasoning_batch.push_str(&r);
+                if !thinking_emitted || last_thinking_flush.elapsed() >= Duration::from_millis(300) {
                     if let Some(f) = on_thinking.as_mut() {
-                        f(reasoning_chars);
+                        f(&reasoning_batch);
                     }
+                    reasoning_batch.clear();
                     thinking_emitted = true;
-                    last_thinking_emit = Instant::now();
+                    last_thinking_flush = Instant::now();
                 }
                 continue;
             }
             match parse_delta(&payload) {
                 Ok(Some(delta)) => {
-                    // 首个正文到达：清思考指示（chars 归零事件）
-                    if reasoning_chars > 0 {
+                    // 首个正文到达：冲刷思考余量（前端据此终结"思考中"态）
+                    if thinking_emitted && !reasoning_batch.is_empty() {
                         if let Some(f) = on_thinking.as_mut() {
-                            f(0);
+                            f(&reasoning_batch);
                         }
-                        reasoning_chars = 0;
+                        reasoning_batch.clear();
                     }
                     full.push_str(&delta);
                     batch.push_str(&delta);
@@ -730,19 +731,15 @@ Content-Type: text/event-stream
         let provider = provider_for(&format!("http://127.0.0.1:{port}"), true);
         let client = reqwest::Client::new();
         let cancel = AtomicBool::new(false);
-        let think = std::sync::Arc::new(std::sync::Mutex::new(0u64));
+        let think = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let t2 = think.clone();
-        let content = chat_once(&client, &provider, "k", &[], &cancel, |_| {}, Some(Box::new(move |c: u64| {
-            // 取最大：正文到达时回调 f(0) 清指示器，最终值会归零
-            let mut m = t2.lock().unwrap();
-            if c > *m {
-                *m = c;
-            }
+        let content = chat_once(&client, &provider, "k", &[], &cancel, |_| {}, Some(Box::new(move |t: &str| {
+            t2.lock().unwrap().push_str(t);
         })))
         .await
         .unwrap();
         assert_eq!(content, "正文", "思考内容不得进入正文");
-        assert!(*think.lock().unwrap() > 0, "思考回调应收到过非零累计字数");
+        assert!(think.lock().unwrap().contains("想一点"), "思考文本增量应经回调外显");
     }
 
     #[tokio::test]
