@@ -38,6 +38,8 @@ export const s = reactive({
   pendingLocate: "",
   /** 专注模式（V1.1，F11）：隐藏侧栏/工具栏，状态栏悬停浮现 */
   focusMode: localStorage.getItem("writer.focus") === "1",
+  /** 多标签（V1.2，FR-EDT-08）：打开的文档页签（path 列表，当前为 current.path） */
+  tabs: [] as string[],
   // 云同步（FR-SYN，M3）
   sync: {
     phase: "idle" as string, // idle | scanning | planning | executing | settling
@@ -158,6 +160,8 @@ function refreshDocStates() {
 export async function openDoc(path: string, force = false) {
   const ok = force ? true : await flush();
   if (!ok) return;
+  // 多标签（FR-EDT-08）：登记页签（去重保序，当前文档置顶活动）
+  if (!s.tabs.includes(path)) s.tabs.push(path);
   // 切换文档：清理在跑/挂起的 AI 流程（A 文档的草稿区间/润色区间不得写进 B 文档）
   void import("./aiflow").then((m) => m.resetAiForDocSwitch());
   const sameDoc = s.current?.path === path;
@@ -194,7 +198,33 @@ export async function renameDoc(path: string, title: string) {
  * 再丢弃 current。删除/文件夹改名/远端删除传播等所有 s.current=null 路径共用 */
 function closeCurrentDoc() {
   void import("./aiflow").then((m) => m.resetAiForDocSwitch());
+  if (s.current) closeTab(s.current.path, false);
   s.current = null;
+}
+
+/** 关闭页签（V1.2）：activateNext=true 时切到相邻页签（用户点 ✕ 场景） */
+export function closeTab(path: string, activateNext = true) {
+  const idx = s.tabs.indexOf(path);
+  s.tabs = s.tabs.filter((p) => p !== path);
+  if (activateNext && s.current?.path === path && s.tabs.length) {
+    const next = s.tabs[Math.min(idx, s.tabs.length - 1)];
+    void openDoc(next);
+  }
+}
+
+/** 页签显示名：树中标题，树缺失时回退文件名 */
+export function tabTitle(path: string): string {
+  const find = (nodes: TreeNode[]): string | null => {
+    for (const n of nodes) {
+      if (n.id === path) return n.name;
+      if (n.children) {
+        const r = find(n.children);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  return find(s.tree) ?? path.split("/").pop()?.replace(/\.md$/, "") ?? path;
 }
 
 /** 树拖拽等外部场景调用的公开包装 */

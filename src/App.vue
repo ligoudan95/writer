@@ -28,6 +28,9 @@ import {
   saveNow,
   createDoc,
   triggerSync,
+  openDoc,
+  closeTab,
+  tabTitle,
 } from "./store";
 
 const bootMsg = ref("正在启动…");
@@ -270,6 +273,25 @@ async function onKey(e: KeyboardEvent) {
       </div>
 
       <main class="main">
+        <!-- 多标签栏（V1.2，FR-EDT-08） -->
+        <div v-if="s.tabs.length && !s.focusMode" class="tabbar">
+          <button
+            v-for="t in s.tabs"
+            :key="t"
+            class="tab"
+            :class="{ active: s.current?.path === t }"
+            :title="t"
+            @click="openDoc(t)"
+            @mousedown.middle.prevent="closeTab(t)"
+          >
+            <span class="tab-name">{{ tabTitle(t) }}</span>
+            <span
+              class="tab-close"
+              title="关闭页签"
+              @click.stop="closeTab(t)"
+            >✕</span>
+          </button>
+        </div>
         <EditorPane />
       </main>
 
