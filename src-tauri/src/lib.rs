@@ -7,6 +7,7 @@ mod docx_import;
 mod frontmatter;
 mod health;
 mod library;
+mod lintcheck;
 mod netcfg;
 mod pdf;
 mod prompts;
@@ -530,6 +531,26 @@ async fn web_search(state: State<'_, AppState>, query: String) -> Result<Vec<web
     tauri::async_runtime::spawn_blocking(move || websearch::search_blocking(&root, &q))
         .await
         .map_err(|e| AppError::new("websearch", e.to_string()))?
+}
+
+// -- 敏感词/错别字检测（V1.3） ----------------------------------------------------
+
+#[tauri::command]
+fn lint_check(state: State<AppState>, scope: String) -> CmdResult<Vec<lintcheck::LintHit>> {
+    let root = lib_root_of(&state)?;
+    Ok(lintcheck::check(&root, &scope))
+}
+
+#[tauri::command]
+fn lint_custom_words(state: State<AppState>) -> CmdResult<String> {
+    let root = lib_root_of(&state)?;
+    Ok(lintcheck::get_custom_words(&root))
+}
+
+#[tauri::command]
+fn lint_set_custom_words(state: State<AppState>, words: String) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    Ok(lintcheck::set_custom_words(&root, &words)?)
 }
 
 // -- 库体检与修复（FR-DOC-07，V1.1） ---------------------------------------------
@@ -1173,6 +1194,9 @@ pub fn run() {
             web_search_config_get,
             web_search_config_set,
             web_search,
+            lint_check,
+            lint_custom_words,
+            lint_set_custom_words,
             sync_test,
             sync_now,
             sync_status,

@@ -166,6 +166,13 @@ export interface StatsSummary {
   weekTotal: number;
   monthTotal: number;
 }
+export interface LintHit {
+  word: string;
+  kind: string;
+  path: string;
+  count: number;
+  context: string;
+}
 export interface WebResult {
   title: string;
   url: string;
@@ -350,4 +357,8 @@ export const api = {
   webSearchConfigSet: (provider: string, url: string, apiKey?: string) =>
     call<WebSearchConfig>("web_search_config_set", { provider, url, apiKey }),
   webSearch: (query: string) => call<WebResult[]>("web_search", { query }),
+  // 敏感词/错别字检测（V1.3）
+  lintCheck: (scope: string) => call<LintHit[]>("lint_check", { scope }),
+  lintCustomWords: () => call<string>("lint_custom_words"),
+  lintSetCustomWords: (words: string) => call<null>("lint_set_custom_words", { words }),
 };

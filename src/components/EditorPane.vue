@@ -694,6 +694,41 @@ function diffLabel(words: number) {
   return "与当前相同";
 }
 
+// 敏感词/错别字检查（V1.3）
+const lintOpen = ref(false);
+const lintHits = ref<import("../api").LintHit[]>([]);
+const lintScopeAll = ref(false);
+const lintBusy = ref(false);
+const lintCustom = ref("");
+const KIND_TIP: Record<string, string> = {
+  sensitive: "极限词（广告法红线，发布场景注意）",
+  custom: "自定义敏感词",
+  duplication: "疑似叠词笔误",
+};
+async function toggleLint() {
+  lintOpen.value = !lintOpen.value;
+  if (lintOpen.value) {
+    lintCustom.value = await api.lintCustomWords();
+    void runLint();
+  }
+}
+async function runLint() {
+  lintBusy.value = true;
+  try {
+    lintHits.value = await api.lintCheck(lintScopeAll.value || !s.current ? "" : s.current.path);
+  } finally {
+    lintBusy.value = false;
+  }
+}
+async function saveLintCustom() {
+  await api.lintSetCustomWords(lintCustom.value);
+  void runLint();
+}
+function jumpLint(hit: import("../api").LintHit) {
+  if (s.current?.path !== hit.path) void openDoc(hit.path);
+  s.pendingLocate = hit.word;
+}
+
 // 大纲视图与拖拽排序（V1.2）：章节区块 = 标题起至下一同级/更高级标题前
 const outlineOpen = ref(false);
 const outline = computed(() => {
@@ -853,6 +888,9 @@ watch(
         <button class="tool" :class="{ on: outlineOpen }" title="大纲（章节导航与拖拽排序）" @click="outlineOpen = !outlineOpen">
           大纲
         </button>
+        <button class="tool" :class="{ on: lintOpen }" title="敏感词/错别字检查（V1.3）" @click="toggleLint">
+          检查
+        </button>
         <button class="tool" :class="{ on: s.focusMode }" title="专注模式（F11：隐藏侧栏/工具栏，状态栏悬停浮现）" @click="toggleFocus()">
           专注
         </button>
@@ -911,6 +949,37 @@ watch(
       <!-- 图片放大预览 -->
       <div v-if="imgPreview" class="modal-mask" @click.self="imgPreview = ''">
         <img :src="imgPreview" class="img-preview" @click="imgPreview = ''" />
+      </div>
+
+      <!-- 敏感词/错别字检查（V1.3） -->
+      <div v-if="lintOpen" class="outline-panel" style="right: 14px; left: auto">
+        <div class="history-head">
+          <span class="history-title">敏感词 / 错别字</span>
+          <span style="flex: 1"></span>
+          <label class="switch" style="font-size: 11.5px" title="关闭 = 仅当前文档">
+            <input v-model="lintScopeAll" type="checkbox" @change="runLint" /> 全库
+          </label>
+          <button class="icon-btn" @click="lintOpen = false">✕</button>
+        </div>
+        <div class="outline-list">
+          <button v-for="(h, i) in lintHits" :key="i" class="lint-item" @click="jumpLint(h)">
+            <span class="lint-word" :class="h.kind" :title="KIND_TIP[h.kind]">{{ h.word }}</span>
+            <span class="muted">×{{ h.count }} · {{ s.current?.path === h.path ? "本文档" : h.path.split("/").pop() }}</span>
+            <div class="lint-ctx">{{ h.context }}</div>
+          </button>
+          <div v-if="!lintBusy && !lintHits.length" class="history-empty">
+            {{ lintScopeAll ? "全库未检出" : "当前文档未检出" }} ✓
+          </div>
+          <div v-if="lintBusy" class="history-empty">检查中…</div>
+        </div>
+        <div style="border-top: 1px solid var(--border); padding: 6px 10px">
+          <input
+            v-model="lintCustom"
+            placeholder="自定义敏感词（逗号分隔），回车保存"
+            style="width: 100%; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); padding: 4px 8px; font-size: 12px"
+            @keydown.enter.prevent="saveLintCustom"
+          />
+        </div>
       </div>
 
       <!-- 表格浮动工具条（FR-EDT-09：表格编辑的操作载体） -->
