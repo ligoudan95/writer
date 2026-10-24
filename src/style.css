@@ -949,6 +949,9 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
 
 /* ===== V1.3：分屏对照 ===== */
 .mid-main { flex: 1; display: flex; min-width: 0; }
+/* 编辑区在横向 flex 容器内必须显式伸展（V1.3-8 分屏容器引入后的回归修复：
+   原直接挂 .main 纵向 flex 下靠 align-stretch 铺满，套层后塌缩为内容宽） */
+.mid-main > .editorpane { flex: 1 1 auto; min-width: 0; }
 .mid-main .splitter { width: 4px; cursor: default; background: transparent; flex: none; }
 .splitpane { display: flex; flex-direction: column; min-width: 0; background: var(--bg-editor); border-left: 1px solid var(--border); }
 .sp2-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
