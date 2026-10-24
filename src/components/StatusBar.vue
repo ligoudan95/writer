@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 状态栏：统计（含阅读时长/选区，FR-EDT-07）+ 今日目标进度（FR-STAT-01）+ 同步指示 + 通知中心入口 + 主题/帮助 */
 import { onMounted, onBeforeUnmount, ref } from "vue";
-import { openSyncHistory, s } from "../store";
+import { openSyncHistory, s, createNote } from "../store";
 import { api, type StatsSummary } from "../api";
 import { theme, setTheme } from "../theme";
 import { notifyCenter, openCenter } from "../notify";
@@ -60,6 +60,11 @@ const lastText = () => {
 function toggleHistory() {
   s.sync.historyOpen = !s.sync.historyOpen;
   if (s.sync.historyOpen) void openSyncHistory();
+}
+
+function quickNote() {
+  const t = window.prompt("灵感便签（存入 docs/便签，不打断当前编辑）");
+  if (t && t.trim()) void createNote(t);
 }
 
 function cycleTheme() {
@@ -134,6 +139,7 @@ const ACTION_LABEL: Record<string, string> = {
       </div>
     </div>
 
+    <button class="icon-btn" title="灵感便签（随手记一段，存入 docs/便签）" @click="quickNote">📌</button>
     <span class="sb-grow" />
     <span v-if="s.root" class="sb-item dim" :title="s.root">{{ s.root }}</span>
 

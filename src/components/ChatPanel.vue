@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from "vue";
 import { api } from "../api";
-import { s } from "../store";
+import { s, createNote } from "../store";
 import { ai, sendChat, insertReplyToBody, exportChatMd, defaultProvider, loadConversation, popLastUserMessage } from "../aiflow";
 
 // Prompt 模板快插（FR-AI-05）：讨论类模板一键入输入框
@@ -96,6 +96,7 @@ function retryChat() {
         <div class="cpm-body">{{ m.content }}</div>
         <div v-if="m.role === 'assistant'" class="cpm-ops">
           <button class="btn small ghost" @click="insertReplyToBody(m.content)">插入正文</button>
+          <button class="btn small ghost" title="存为灵感便签（P2）" @click="createNote(m.content)">存为便签</button>
         </div>
       </div>
       <div v-if="ai.chat.streaming" class="cp-msg assistant">

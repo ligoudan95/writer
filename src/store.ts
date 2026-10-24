@@ -272,6 +272,25 @@ export async function deleteNode(node: TreeNode) {
   }, 5000);
 }
 
+/** 灵感便签（V1.3）：快速一段文字入库 docs/便签/，不打断当前编辑 */
+export async function createNote(text: string) {
+  const t = text.trim();
+  if (!t) return;
+  try {
+    await api.createFolder("", "便签");
+  } catch {
+    /* 已存在 */
+  }
+  const time = new Date();
+  const stamp = `${time.getMonth() + 1}${String(time.getDate()).padStart(2, "0")}-${String(time.getHours()).padStart(2, "0")}${String(time.getMinutes()).padStart(2, "0")}`;
+  const node = await api.createDoc("docs/便签", stamp);
+  await api.writeDoc(node.id, `${t}
+`, "", true); // force：覆盖新建占位正文，frontmatter 保留
+  await refreshTree();
+  s.toast = { msg: `已存便签：${stamp}` };
+  setTimeout(() => (s.toast = null), 2500);
+}
+
 export async function createFolder(parent = s.selectedFolder) {
   const name = `新文件夹${s.tree.length ? "" : ""}`;
   const node = await api.createFolder(parent, name);
