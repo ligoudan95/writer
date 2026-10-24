@@ -7,7 +7,7 @@
 import { onMounted, ref } from "vue";
 import { save } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { s, setupPeriodicSync } from "../store";
+import { s, setupPeriodicSync, refreshTree } from "../store";
 import { api, type NetConfig } from "../api";
 import { theme, setTheme, type ThemeMode } from "../theme";
 import { layout, FONT_CANDIDATES, DEFAULT_LAYOUT } from "../layout";
@@ -16,7 +16,7 @@ import { checkUpdate, autoCheckEnabled, setAutoCheck } from "../update";
 import AiSettings from "./AiSettings.vue";
 import SyncSettings from "./SyncSettings.vue";
 
-type Tab = "appearance" | "editor" | "ai" | "sync" | "network" | "backup" | "about";
+type Tab = "appearance" | "editor" | "ai" | "sync" | "network" | "backup" | "storage" | "about";
 const props = defineProps<{ initialTab?: Tab }>();
 const tab = ref<Tab>(props.initialTab ?? "appearance");
 
@@ -94,6 +94,54 @@ async function runHealthFix() {
     healthIssues.value = await api.healthCheck();
   } finally {
     healthBusy.value = false;
+  }
+}
+
+// -- 存储面板 + 恢复向导（FR-PKG-05 / FR-SAV-05） --------------------------------
+const storage = ref<import("../api").StorageInfo | null>(null);
+const snapDays = ref(90);
+const keepBackups = ref(7);
+const restoring = ref<null | { name: string; docs: string[]; picked: Set<string> }>(null);
+const restoreBusy = ref(false);
+const restoreDone = ref<string[] | null>(null);
+
+async function loadStorage() {
+  storage.value = await api.storageInfo();
+  snapDays.value = storage.value.snapshotKeepDays;
+  keepBackups.value = storage.value.backupKeep;
+}
+
+async function doCleanup() {
+  const [freed, acts] = await api.storageCleanup();
+  s.toast = { msg: `已清理，释放 ${fmtSize(freed)}${acts.length ? "（" + acts.join("；") + "）" : ""}` };
+  setTimeout(() => (s.toast = null), 5000);
+  await loadStorage();
+  await refreshBackups();
+}
+
+async function savePolicy() {
+  await api.storageSetPolicy(snapDays.value, keepBackups.value);
+  s.toast = { msg: "保留策略已保存" };
+  setTimeout(() => (s.toast = null), 2500);
+}
+
+async function openRestore(name: string) {
+  restoreDone.value = null;
+  const entry = await api.backupListEntries(name);
+  restoring.value = { name, docs: entry.docs, picked: new Set(entry.docs) };
+}
+
+async function doRestore(all: boolean) {
+  if (!restoring.value) return;
+  restoreBusy.value = true;
+  try {
+    const sel = restoring.value.docs.filter((d) => restoring.value!.picked.has(d));
+    const r = await api.backupRestore(restoring.value.name, all, all ? [] : sel);
+    restoreDone.value = [`恢复完成（${r.length} 项，恢复前已自动备份当前状态）`];
+    restoring.value = null;
+    await refreshTree();
+  } finally {
+    restoreBusy.value = false;
   }
 }
 
@@ -210,6 +258,7 @@ function toggleUpdateAuto() {
           <button :class="{ on: tab === 'appearance' }" @click="tab = 'appearance'">外观</button>
           <button :class="{ on: tab === 'editor' }" @click="tab = 'editor'">编辑器</button>
           <button :class="{ on: tab === 'backup' }" @click="tab = 'backup'">备份与诊断</button>
+          <button :class="{ on: tab === 'storage' }" @click="tab = 'storage'; loadStorage()">存储与恢复</button>
           <button :class="{ on: tab === 'about' }" @click="tab = 'about'">关于</button>
         </nav>
 
@@ -387,6 +436,64 @@ function toggleUpdateAuto() {
             </div>
           </div>
           <div class="sd-sub">日志滚动保留 7 天；诊断包不含正文、API Key 与密码。</div>
+        </div>
+
+        <!-- 存储与恢复（FR-PKG-05 / FR-SAV-05） -->
+        <div v-if="tab === 'storage'" class="sd-pane">
+          <template v-if="storage">
+            <div class="stat-cards">
+              <div class="stat-card"><b>{{ fmtSize(storage.docsBytes) }}</b><span>正文</span></div>
+              <div class="stat-card"><b>{{ fmtSize(storage.snapshotsBytes) }}</b><span>快照 ×{{ storage.snapshotsCount }}</span></div>
+              <div class="stat-card"><b>{{ fmtSize(storage.backupsBytes) }}</b><span>备份 ×{{ storage.backupsCount }}</span></div>
+              <div class="stat-card"><b>{{ fmtSize(storage.trashBytes) }}</b><span>回收站 ×{{ storage.trashCount }}</span></div>
+              <div class="stat-card"><b>{{ fmtSize(storage.attachmentsBytes) }}</b><span>附件 ×{{ storage.attachmentsCount }}</span></div>
+            </div>
+            <div class="sd-row" style="gap: 8px">
+              <button class="btn small" @click="doCleanup">一键清理（旧快照 + 旧备份 + 回收站）</button>
+              <span class="sd-sub">附件为内容资产不自动清理</span>
+            </div>
+            <div class="sd-row" style="gap: 8px">
+              <span class="sd-label" style="min-width: auto">快照保留</span>
+              <input v-model.number="snapDays" class="sd-input" type="number" min="7" max="3650" style="width:90px" /> 天
+              <span class="sd-label" style="min-width: auto">备份保留</span>
+              <input v-model.number="keepBackups" class="sd-input" type="number" min="1" max="30" style="width:70px" /> 份
+              <button class="btn small" @click="savePolicy">保存策略</button>
+            </div>
+          </template>
+
+          <div class="sd-sub" style="margin-top: 6px"><b>备份恢复向导</b>：恢复前会自动把当前状态再备份一份</div>
+          <div v-if="backups.length" class="sd-list" style="max-height: 180px">
+            <div v-for="b in backups" :key="b.name" class="sd-item">
+              <span>{{ b.name }}</span>
+              <span class="muted">{{ fmtSize(b.size) }} · {{ fmtTime(b.ts) }} ·
+                <button class="btn small ghost" @click="openRestore(b.name)">恢复…</button>
+              </span>
+            </div>
+          </div>
+          <div v-else class="sd-sub">暂无备份（每日启动自动产生）。</div>
+
+          <!-- 恢复确认（FR-SAV-05：预览 + 整库/勾选） -->
+          <div v-if="restoring" class="ai-edit" style="margin-top: 8px">
+            <div class="sd-sub">从 {{ restoring.name }} 恢复（{{ restoring.docs.length }} 篇）——勾选单篇或整库：</div>
+            <div class="sd-list" style="max-height: 180px">
+              <label v-for="d in restoring.docs" :key="d" class="sd-item" style="cursor: pointer">
+                <input
+                  type="checkbox"
+                  :checked="restoring.picked.has(d)"
+                  @change="restoring.picked.has(d) ? restoring.picked.delete(d) : restoring.picked.add(d); restoring.picked = new Set(restoring.picked)"
+                />
+                <span style="margin-left: 6px">{{ d }}</span>
+              </label>
+            </div>
+            <div class="sd-row" style="gap: 8px; margin-top: 8px">
+              <button class="btn small primary" :disabled="restoreBusy" @click="doRestore(true)">整库恢复</button>
+              <button class="btn small" :disabled="restoreBusy || !restoring.picked.size" @click="doRestore(false)">
+                恢复勾选的 {{ restoring.picked.size }} 篇
+              </button>
+              <button class="btn small ghost" @click="restoring = null">取消</button>
+            </div>
+          </div>
+          <div v-if="restoreDone" class="sd-sub" style="color: #2e7d32">{{ restoreDone[0] }}</div>
         </div>
 
         <!-- 关于（FR-PKG-07 组件清单 + 信任声明；FR-SET-02 更新入口） -->

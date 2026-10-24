@@ -105,7 +105,16 @@ fn add_file_to_zip(
 fn create_backup(root: &Path, include_attachments: bool) -> Result<String, AppError> {
     let dir = backups_dir(root);
     fs::create_dir_all(&dir)?;
-    let name = format!("backup-{}.zip", stamp(now_secs()));
+    // 同秒重名碰撞：文件名秒级时间戳，一秒内连做两份备份（如恢复向导的
+    // "恢复前自动备份"）会静默互覆——同名时追加 -2/-3 唯一化
+    let mut name = format!("backup-{}.zip", stamp(now_secs()));
+    {
+        let mut n = 2;
+        while dir.join(&name).exists() || dir.join(format!("{name}.tmp")).exists() {
+            name = format!("backup-{}-{n}.zip", stamp(now_secs()));
+            n += 1;
+        }
+    }
     let path = dir.join(&name);
     let tmp = dir.join(format!("{name}.tmp"));
     let result = (|| -> Result<(), AppError> {

@@ -11,6 +11,7 @@ mod netcfg;
 mod pdf;
 mod search;
 mod stats;
+mod storage;
 mod secrets;
 mod sync;
 
@@ -470,6 +471,44 @@ fn health_check(state: State<AppState>) -> CmdResult<Vec<health::HealthIssue>> {
 fn health_fix(state: State<AppState>, issues: Vec<health::HealthIssue>) -> CmdResult<health::FixReport> {
     let root = lib_root_of(&state)?;
     Ok(health::fix_all(&root, &issues)?)
+}
+
+// -- 存储空间面板 + 备份恢复向导（FR-PKG-05 / FR-SAV-05，V1.1） -------------------
+
+#[tauri::command]
+fn storage_info(state: State<AppState>) -> CmdResult<storage::StorageInfo> {
+    let root = lib_root_of(&state)?;
+    Ok(storage::info(&root))
+}
+
+#[tauri::command]
+fn storage_cleanup(state: State<AppState>) -> CmdResult<(u64, Vec<String>)> {
+    let root = lib_root_of(&state)?;
+    Ok(storage::cleanup(&root)?)
+}
+
+#[tauri::command]
+fn storage_set_policy(state: State<AppState>, snapshotDays: u64, backupKeep: u64) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    storage::set_policy(&root, snapshotDays, backupKeep as usize)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn backup_list_entries(state: State<AppState>, name: String) -> CmdResult<storage::BackupEntry> {
+    let root = lib_root_of(&state)?;
+    Ok(storage::list_backup(&root, &name)?)
+}
+
+#[tauri::command]
+fn backup_restore(
+    state: State<AppState>,
+    name: String,
+    restoreAll: bool,
+    selected: Vec<String>,
+) -> CmdResult<Vec<String>> {
+    let root = lib_root_of(&state)?;
+    Ok(storage::restore(&root, &name, restoreAll, &selected)?)
 }
 
 // -- 写作目标与统计（FR-STAT-01/02，V1.1） ---------------------------------------
@@ -1040,6 +1079,11 @@ pub fn run() {
             stats_set_goal,
             health_check,
             health_fix,
+            storage_info,
+            storage_cleanup,
+            storage_set_policy,
+            backup_list_entries,
+            backup_restore,
             sync_test,
             sync_now,
             sync_status,

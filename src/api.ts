@@ -166,6 +166,25 @@ export interface HealthIssue {
   detail: string;
   fixable: boolean;
 }
+export interface StorageInfo {
+  snapshotsCount: number;
+  snapshotsBytes: number;
+  backupsCount: number;
+  backupsBytes: number;
+  trashCount: number;
+  trashBytes: number;
+  attachmentsCount: number;
+  attachmentsBytes: number;
+  docsBytes: number;
+  totalBytes: number;
+  snapshotKeepDays: number;
+  backupKeep: number;
+}
+export interface BackupEntry {
+  name: string;
+  ts: number;
+  docs: string[];
+}
 
 // -- 网络出口（M5.1：AI 与 WebDAV 共用；默认直连绕过系统代理） ------------------
 
@@ -287,4 +306,12 @@ export const api = {
   healthCheck: () => call<HealthIssue[]>("health_check"),
   healthFix: (issues: HealthIssue[]) =>
     call<{ fixed: string[]; skipped: string[]; backup: string }>("health_fix", { issues }),
+  // 存储空间面板 + 备份恢复向导（FR-PKG-05 / FR-SAV-05）
+  storageInfo: () => call<StorageInfo>("storage_info"),
+  storageCleanup: () => call<[number, string[]]>("storage_cleanup"),
+  storageSetPolicy: (snapshotDays: number, backupKeep: number) =>
+    call<null>("storage_set_policy", { snapshotDays, backupKeep }),
+  backupListEntries: (name: string) => call<BackupEntry>("backup_list_entries", { name }),
+  backupRestore: (name: string, restoreAll: boolean, selected: string[]) =>
+    call<string[]>("backup_restore", { name, restoreAll, selected }),
 };
