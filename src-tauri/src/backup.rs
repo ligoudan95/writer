@@ -238,6 +238,26 @@ pub fn export_diagnostics(root: &Path, app_config_path: Option<&Path>, dest: &st
     let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
+    /// B6：日志脱敏——URL 保留协议+域名，路径与查询串剔除（Provider 端点/查询词不外泄）
+    fn redact_urls(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(i) = rest.find("://") {
+            let head = &rest[..i];
+            let tail = &rest[i + 3..];
+            let end = tail
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '[' || c == ']')
+                .unwrap_or(tail.len());
+            out.push_str(&head[..head.rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != ':' && c != '-').map(|x| x + 1).unwrap_or(head.len())]);
+            out.push_str("://");
+            out.push_str(&tail[..end]);
+            out.push_str("[…]");
+            rest = &tail[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     // 1. 日志（近 7 天全部）
     let logs = root.join(".writer").join("logs");
     if logs.is_dir() {
@@ -247,7 +267,7 @@ pub fn export_diagnostics(root: &Path, app_config_path: Option<&Path>, dest: &st
                     let n = e.file_name().to_string_lossy().to_string();
                     zip.start_file(format!("logs/{n}"), opts)
                         .map_err(|e| AppError::new("io", e.to_string()))?;
-                    zip.write_all(&bytes)?;
+                    zip.write_all(redact_urls(&String::from_utf8_lossy(&bytes)).as_bytes())?;
                 }
             }
         }

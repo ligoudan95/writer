@@ -85,10 +85,10 @@ pub fn save(cfg: &NetConfig) -> Result<(), AppError> {
 pub fn validate(cfg: &NetConfig) -> Result<(), AppError> {
     if cfg.mode == ProxyMode::Custom {
         let u = cfg.url.trim();
-        if !(u.starts_with("http://") || u.starts_with("https://")) {
+        if !(u.starts_with("http://") || u.starts_with("https://") || u.starts_with("socks5://") || u.starts_with("socks5h://")) {
             return Err(AppError::new(
                 "net_config",
-                "自定义代理必须以 http:// 或 https:// 开头",
+                "自定义代理必须以 http(s):// 或 socks5(h):// 开头",
             ));
         }
     }

@@ -944,6 +944,14 @@ fn ai_message_delete_last(state: State<AppState>, conv_id: String, role: String)
     Ok(())
 }
 
+/// B9：AI 会话历史清理（conv_id 空 = 全部）
+#[tauri::command]
+fn ai_history_clear(state: State<AppState>, conv_id: String) -> CmdResult<()> {
+    let root = lib_root_of(&state)?;
+    db::MetaDb::open(&root)?.conversations_clear(&conv_id)?;
+    Ok(())
+}
+
 #[tauri::command]
 fn ai_request_log(state: State<AppState>, limit: Option<usize>) -> CmdResult<Vec<db::AiRequestLog>> {
     let root = lib_root_of(&state)?;
@@ -1179,6 +1187,7 @@ pub fn run() {
             ai_message_append,
             ai_message_delete_last,
             ai_request_log,
+            ai_history_clear,
             ai_request_log_clear,
             doc_set_privacy,
             doc_set_star,

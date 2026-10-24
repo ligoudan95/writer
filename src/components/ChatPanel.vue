@@ -1,12 +1,23 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from "vue";
+import { api } from "../api";
+import { s } from "../store";
 import { ai, sendChat, insertReplyToBody, exportChatMd, defaultProvider, loadConversation, popLastUserMessage } from "../aiflow";
 
 // Prompt 模板快插（FR-AI-05）：讨论类模板一键入输入框
 const tplOpen = ref(false);
 const chatTemplates = () => ai.templates.filter((t) => t.category === "chat");
-import { api } from "../api";
-import { s } from "../store";
+
+// B9：清空本文档讨论历史（DB + 面板状态）
+async function clearHistory() {
+  if (!ai.chat.convId) return;
+  const { confirm } = await import("@tauri-apps/plugin-dialog");
+  if (!(await confirm("清空本文档的全部讨论历史？（不影响正文）", { title: "清空讨论历史" }))) return;
+  await api.aiHistoryClear(ai.chat.convId);
+  ai.chat.messages = [];
+  ai.chat.convId = "";
+  await loadConversation();
+}
 
 const input = ref("");
 const listEl = ref<HTMLElement | null>(null);
@@ -62,6 +73,7 @@ function retryChat() {
       <span class="cp-title">AI 讨论</span>
       <span style="flex: 1"></span>
       <button class="btn small ghost" title="导出为 Markdown（B7）" @click="exportChatMd()">导出</button>
+      <button class="btn small ghost danger" title="清空本文档的 AI 讨论历史（B9）" @click="clearHistory">清空</button>
       <button class="icon-btn" @click="ai.chatOpen = false">✕</button>
     </div>
     <div class="cp-ctx">

@@ -303,6 +303,7 @@ export const api = {
     call<null>("ai_message_delete_last", { convId, role }),
   aiRequestLog: (limit?: number) => call<AiRequestLog[]>("ai_request_log", { limit }),
   aiRequestLogClear: () => call<null>("ai_request_log_clear"),
+  aiHistoryClear: (convId: string) => call<null>("ai_history_clear", { convId }),
   docSetPrivacy: (path: string, privacy: boolean) =>
     call<WriteResult>("doc_set_privacy", { path, privacy }),
   docSetStar: (path: string, on: boolean) =>

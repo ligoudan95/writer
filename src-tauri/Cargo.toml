@@ -33,7 +33,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
 # M3 同步：WebDAV 客户端（唯一网络出口 NetGateway 的执行层）
 # M4 AI：stream 供 SSE 增量消费（chat_stream）
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "gzip", "stream", "json", "socks"] }
 futures-util = "0.3"
 # M3 同步：sync_state.db / 墓碑去重 / 同步历史
 rusqlite = { version = "0.37", features = ["bundled"] }

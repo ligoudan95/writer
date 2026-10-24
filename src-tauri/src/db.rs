@@ -309,6 +309,23 @@ impl MetaDb {
         }
     }
 
+    /// 清空 AI 会话与消息（B9 历史清理入口；conv_id 为空 = 全部）
+    pub fn conversations_clear(&self, conv_id: &str) -> Result<usize, AppError> {
+        let n = if conv_id.is_empty() {
+            self.conn
+                .execute("DELETE FROM ai_messages", [])
+                .and_then(|_| self.conn.execute("DELETE FROM ai_conversations", []))
+                .map(|_| 0)
+                .map_err(|e| AppError::new("db", e.to_string()))?;
+            0
+        } else {
+            self.conn
+                .execute("DELETE FROM ai_messages WHERE conv_id = ?1", [conv_id])
+                .map_err(|e| AppError::new("db", e.to_string()))?
+        };
+        Ok(n)
+    }
+
     pub fn request_log_clear(&self) {
         let _ = self.conn.execute("DELETE FROM ai_request_log", []);
     }
