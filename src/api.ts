@@ -143,6 +143,12 @@ export interface AiRequestLog {
   chars: number;
   kind: string;
 }
+export interface SearchHit {
+  path: string;
+  title: string;
+  snippet: string;
+  score: number;
+}
 
 // -- 网络出口（M5.1：AI 与 WebDAV 共用；默认直连绕过系统代理） ------------------
 
@@ -250,4 +256,7 @@ export const api = {
   netConfigGet: () => call<NetConfig>("net_config_get"),
   netConfigSet: (mode: NetConfig["mode"], url: string) =>
     call<NetConfig>("net_config_set", { mode, url }),
+  // 全文搜索（FR-SEARCH-01）
+  searchQuery: (q: string) => call<SearchHit[]>("search_query", { q }),
+  searchRebuild: () => call<number>("search_rebuild"),
 };

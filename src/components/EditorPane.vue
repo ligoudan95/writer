@@ -374,6 +374,27 @@ function applyContent() {
     requestAnimationFrame(() => {
       document.querySelector(".editor-scroll")?.scrollTo({ top: pos.scrollTop });
     });
+    return;
+  }
+  // 全文搜索定位（FR-SEARCH-01）：首个命中词 → 光标 + 滚动（一次性消费）
+  const locate = s.pendingLocate;
+  if (locate) {
+    s.pendingLocate = "";
+    const target = locate.toLowerCase();
+    let found = false;
+    editor.state.doc.descendants((node, nodePos) => {
+      if (found || !node.isText || !node.text) return !found;
+      const i = node.text.toLowerCase().indexOf(target);
+      if (i >= 0) {
+        found = true;
+        editor
+          .chain()
+          .setTextSelection(nodePos + i)
+          .scrollIntoView()
+          .run();
+      }
+      return !found;
+    });
   }
 }
 

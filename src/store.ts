@@ -34,6 +34,8 @@ export const s = reactive({
   exportOpen: false,
   /** 远端更新重载信号（FR-SYN-09）：path 不变时驱动编辑器重应用内容 */
   reloadNonce: 0,
+  /** 全文搜索定位词（FR-SEARCH-01）：打开文档后由编辑器消费一次（光标+滚动到命中） */
+  pendingLocate: "",
   // 云同步（FR-SYN，M3）
   sync: {
     phase: "idle" as string, // idle | scanning | planning | executing | settling

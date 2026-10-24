@@ -8,6 +8,7 @@ mod frontmatter;
 mod library;
 mod netcfg;
 mod pdf;
+mod search;
 mod secrets;
 mod sync;
 
@@ -423,6 +424,25 @@ fn net_config_set(
     aist.rebuild(&cfg);
     applog::info("", &format!("网络出口设置已更新：mode={}", cfg.mode.as_str()));
     Ok(NetConfigView { mode: cfg.mode.as_str(), url: cfg.url })
+}
+
+// -- 全文搜索（FR-SEARCH-01，V1.1） ---------------------------------------------
+
+/// 跨文档搜索：查询前对账（增量重索引变更文件，自愈所有写入路径）
+#[tauri::command]
+fn search_query(state: State<AppState>, q: String) -> CmdResult<Vec<search::SearchHit>> {
+    let root = lib_root_of(&state)?;
+    let conn = search::open(&root)?;
+    search::reconcile(&conn, &root)?;
+    Ok(search::query(&conn, &q)?)
+}
+
+/// 索引全量重建（库体检入口复用）
+#[tauri::command]
+fn search_rebuild(state: State<AppState>) -> CmdResult<usize> {
+    let root = lib_root_of(&state)?;
+    let conn = search::open(&root)?;
+    Ok(search::rebuild(&conn, &root)?)
 }
 
 #[derive(Serialize)]
@@ -959,6 +979,8 @@ pub fn run() {
             sync_config_set,
             net_config_get,
             net_config_set,
+            search_query,
+            search_rebuild,
             sync_test,
             sync_now,
             sync_status,

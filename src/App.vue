@@ -10,6 +10,7 @@ import ConflictView from "./components/ConflictView.vue";
 import DirectionAsk from "./components/DirectionAsk.vue";
 import ChatPanel from "./components/ChatPanel.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import GlobalSearch from "./components/GlobalSearch.vue";
 import NotificationCenter from "./components/NotificationCenter.vue";
 import TrashPanel from "./components/TrashPanel.vue";
 import HelpOverlay from "./components/HelpOverlay.vue";
@@ -34,6 +35,7 @@ const settingsOpen = ref(false);
 const settingsTab = ref<"appearance" | "editor" | "ai" | "sync" | "network" | "backup" | "about">("appearance");
 const trashOpen = ref(false);
 const helpOpen = ref(false);
+const searchOpen = ref(false);
 
 /** 打开设置中心（可指定接口配置标签页）。设置项已内嵌为标签页，
  * 旧浮层入口（ai.settingsOpen / s.sync.settingsOpen）在此收敛路由 */
@@ -205,6 +207,10 @@ async function onKey(e: KeyboardEvent) {
     // Ctrl+Shift+A 打开 AI 面板（附录 A）
     e.preventDefault();
     void import("./aiflow").then((m) => m.openChat());
+  } else if (k === "f" && e.shiftKey) {
+    // Ctrl+Shift+F 全文搜索（FR-SEARCH-01）
+    e.preventDefault();
+    searchOpen.value = !searchOpen.value;
   }
 }
 </script>
@@ -272,6 +278,7 @@ async function onKey(e: KeyboardEvent) {
 
     <!-- 设置中心（含 AI 接口 / 云同步 / 网络出口标签页）/ 通知中心 / 回收站 / 帮助（M5） -->
     <SettingsDialog v-if="settingsOpen" :key="settingsTab" :initial-tab="settingsTab" @close="settingsOpen = false" />
+    <GlobalSearch v-if="searchOpen" @close="searchOpen = false" />
     <NotificationCenter />
     <TrashPanel v-if="trashOpen" @close="trashOpen = false" />
     <HelpOverlay v-if="helpOpen" @close="helpOpen = false" />
