@@ -6,7 +6,7 @@
   "plugins": {
     "updater": {
       "dialog": false,
-      "pubkey": "RWQG8y1TOq+118RC4vV5UwJ+dz1uFILWlXbET4t+aMJYg8GTqbGrEFS6",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUzODRCN0YwOTNDNzQyOEYKUldTUFFzZVQ4TGVFVTBRQUZYWEExR05ZaDE2cSsrM24vdFhUU21ZOEF4QTJvZ1FoZVgrdWFDdGYK",
       "endpoints": [
         "https://github.com/ligoudan95/writer/releases/latest/download/latest.json"
       ]
@@ -58,6 +58,7 @@
         ],
         "installerHooks": "./nsis-hooks.nsh"
       }
-    }
+    },
+    "createUpdaterArtifacts": true
   }
 }
