@@ -190,8 +190,22 @@ impl StorageBackend for DavBackend {
                 Err(e) => return Err(e),
             };
             let text = resp.text().map_err(|e| AppError::new("net", e.to_string()))?;
-            for entry in parse_propfind(&text) {
-                // Depth:1 首个 response 是目录自身，跳过
+            // 目录自身的末段名（parse 只回末段，自身条目 = 末段等于被列目录名，P0）
+            let self_name = if dir.is_empty() {
+                self.base.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
+            } else {
+                dir.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
+            };
+            for (idx, entry) in parse_propfind(&text).into_iter().enumerate() {
+                // 跳过目录自身（Depth:1 首个 response 按约定是集合本身；parse 只取
+                // href 末段，自身条目名 = 目录名——否则自身被当子目录反复入队，
+                // 对 dir/dir 发 PROPFIND 得 404，整批同步失败）
+                if idx == 0 && entry.is_dir {
+                    continue;
+                }
+                if entry.is_dir && entry.path == self_name {
+                    continue; // 非首位返回的自身条目（服务器乱序）防护
+                }
                 if entry.path.is_empty() {
                     continue;
                 }
@@ -661,5 +675,52 @@ mod tests {
         assert_eq!(extract_tag(r#"<d:getetag>&quot;abc&quot;</d:getetag>"#, "getetag").as_deref(), Some("&quot;abc&quot;"));
         assert_eq!(extract_tag(r#"<x:getetag><![CDATA["z"]]></x:getetag>"#, "getetag").as_deref(), Some(r#""z""#));
         assert_eq!(extract_tag(r#"<nope>1</nope>"#, "getetag"), None);
+    }
+
+    /// 回归：Depth:1 列表的首个 response 是目录自身（href 末段 = 目录名）。
+    /// 曾经自身条目被当子目录入队 → 对 dir/dir 发 PROPFIND 404 → 整批同步失败
+    /// （坚果云真实事故：首绑走"建根+空远端"分支，第二次同步起必炸）。
+    /// 本测试第 3 个及以后的请求一律 404：修复缺失时会直接失败。
+    #[test]
+    fn list_all_skips_self_entries() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut n = 0u32;
+            while let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let body = match n {
+                    0 => concat!(
+                        "HTTP/1.1 207 Multi\r\nContent-Type: application/xml\r\n\r\n",
+                        r#"<d:multistatus><d:response><d:href>/dav/writer</d:href>"#,
+                        r#"<d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>"#,
+                        r#"<d:response><d:href>/dav/writer/docs</d:href>"#,
+                        r#"<d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response></d:multistatus>"#,
+                    ),
+                    1 => concat!(
+                        "HTTP/1.1 207 Multi\r\nContent-Type: application/xml\r\n\r\n",
+                        r#"<d:multistatus><d:response><d:href>/dav/writer/docs</d:href>"#,
+                        r#"<d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>"#,
+                        r#"<d:response><d:href>/dav/writer/docs/a.md</d:href>"#,
+                        r#"<d:propstat><d:prop><d:resourcetype/><d:getetag>e1</d:getetag></d:prop></d:propstat></d:response></d:multistatus>"#,
+                    ),
+                    _ => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                };
+                n += 1;
+                let _ = sock.write_all(body.as_bytes());
+                let _ = sock.flush();
+            }
+        });
+        let cfg = DavConfig {
+            url: format!("http://127.0.0.1:{port}/dav/"),
+            username: "u".into(),
+            remote_root: "writer".into(),
+        };
+        let mut b = DavBackend::new(cfg, "p".into()).unwrap();
+        let entries = b.list_all().expect("必须跳过自身条目，不得对 dir/dir 二次请求");
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["docs", "docs/a.md"]);
     }
 }

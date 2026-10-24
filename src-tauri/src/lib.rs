@@ -893,6 +893,14 @@ pub fn run() {
                 let out = std::env::args()
                     .nth(pos + 1)
                     .unwrap_or_else(|| ".pdf-selftest.pdf".into());
+                // PrintToPdf 要求绝对路径（相对路径报 E_INVALIDARG 0x80070057）
+                let out = if std::path::Path::new(&out).is_absolute() {
+                    out
+                } else {
+                    std::env::current_dir()
+                        .map(|d| d.join(&out).to_string_lossy().to_string())
+                        .unwrap_or(out)
+                };
                 if let Some(main) = app.get_webview_window("main") {
                     let _ = main.hide();
                 }

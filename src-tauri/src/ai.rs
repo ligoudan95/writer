@@ -193,8 +193,24 @@ pub fn parse_models(body: &str) -> Result<Vec<String>, AppError> {
 // 请求构造与错误归因（FR-AI-08）
 // ---------------------------------------------------------------------------
 
+/// 端点拼装：base_url 以版本段（v1/v4/…）结尾时视为已含版本——只追加业务路径，
+/// 不再强插 v1（智谱 paas/v4 等非 v1 版本号根地址的适配，FR-AI-01 兼容扩展）
 fn endpoint(base_url: &str, path: &str) -> String {
-    format!("{}/{}", base_url.trim_end_matches('/'), path)
+    let base = base_url.trim_end_matches('/');
+    let is_versioned = base
+        .rsplit('/')
+        .next()
+        .map(|s| {
+            let t = s.strip_prefix('v').unwrap_or(s);
+            !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
+        })
+        .unwrap_or(false);
+    let tail = if is_versioned {
+        path.strip_prefix("v1/").unwrap_or(path)
+    } else {
+        path
+    };
+    format!("{base}/{tail}")
 }
 
 fn map_status(status: u16) -> AppError {
@@ -510,6 +526,11 @@ mod tests {
     #[test]
     fn endpoint_join_and_chars() {
         assert_eq!(endpoint("https://api.x.com/", "v1/chat/completions"), "https://api.x.com/v1/chat/completions");
+        // 带版本段根地址：不再强插 v1（智谱 paas/v4）
+        assert_eq!(endpoint("https://open.bigmodel.cn/api/paas/v4", "v1/chat/completions"), "https://open.bigmodel.cn/api/paas/v4/chat/completions");
+        assert_eq!(endpoint("https://open.bigmodel.cn/api/paas/v4/", "v1/models"), "https://open.bigmodel.cn/api/paas/v4/models");
+        // 根路径含端口/无版本段：保持 v1 前缀
+        assert_eq!(endpoint("https://api.deepseek.com", "v1/chat/completions"), "https://api.deepseek.com/v1/chat/completions");
         let msgs = vec![
             ChatMsg { role: "user".into(), content: "你好".into() },
             ChatMsg { role: "system".into(), content: "abc".into() },
