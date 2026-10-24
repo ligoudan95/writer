@@ -541,6 +541,40 @@ fn epub_export(title: String, chapters: Vec<epub::Chapter>, dest: String) -> Cmd
     Ok(epub::build(&title, &chapters, &dest)?)
 }
 
+// -- 长图导出（V1.3）：HTML → 整页 PNG（本机 Chrome/Edge，puppeteer-core） ---------
+
+#[tauri::command]
+async fn longimage_export(html: String, dest: String, width: Option<u32>) -> CmdResult<()> {
+    let tmp = std::env::temp_dir().join(format!("writer-longimage-{}.html", uuid::Uuid::new_v4().simple()));
+    library::atomic_write(&tmp, html.as_bytes())?;
+    let tmp2 = tmp.clone();
+    let script = std::env::current_dir()
+        .map(|d| d.join("scripts").join("export-longimage.mjs"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("scripts/export-longimage.mjs"));
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new("node")
+            .arg(&script)
+            .arg(&tmp2)
+            .arg(&dest)
+            .arg(width.unwrap_or(760).to_string())
+            .output()
+    })
+    .await
+    .map_err(|e| AppError::new("longimage", e.to_string()))?
+    .map_err(|e| AppError::new("longimage", format!("启动 node 失败：{e}")))?;
+    let _ = std::fs::remove_file(&tmp);
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let msg = if err.contains("NO_BROWSER") {
+            "未找到本机 Chrome/Edge（长图导出依赖浏览器）"
+        } else {
+            &err[..err.len().min(160)]
+        };
+        return Err(AppError::new("longimage", format!("长图导出失败：{msg}")));
+    }
+    Ok(())
+}
+
 // -- 敏感词/错别字检测（V1.3） ----------------------------------------------------
 
 #[tauri::command]
@@ -1204,6 +1238,7 @@ pub fn run() {
             web_search,
             lint_check,
             epub_export,
+            longimage_export,
             lint_custom_words,
             lint_set_custom_words,
             sync_test,

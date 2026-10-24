@@ -8,7 +8,7 @@ import { exportTxt, exportMd, exportDocx, exportHtml, dedupeTitleH1 } from "../e
 import { exportTokens } from "../layout";
 import { mdToDoc, type PMNode } from "../codec";
 
-type Fmt = "txt" | "md" | "docx" | "pdf" | "html" | "epub";
+type Fmt = "txt" | "md" | "docx" | "pdf" | "html" | "epub" | "png";
 // 导出记忆（FR-EXP-01）：跨会话持久化上次格式与目标路径 + 导出选项
 const fmt = ref<Fmt>((localStorage.getItem("writer.export.fmt") as Fmt) || "md");
 const crlf = ref(false);
@@ -79,6 +79,7 @@ const FORMATS: { id: Fmt; label: string }[] = [
   { id: "pdf", label: "PDF" },
   { id: "html", label: "HTML" },
   { id: "epub", label: "EPUB" },
+  { id: "png", label: "长图" },
 ];
 
 /** 完整 HTML 文档（内联样式，浏览器直接打开） */
@@ -121,6 +122,8 @@ async function doExport() {
         [{ title: s.current.title || base, html: exportHtml(json, lt) }],
         target,
       );
+    } else if (fmt.value === "png") {
+      await api.longimageExport(htmlFullDoc(s.current.title || base, exportHtml(json, lt)), target);
     } else {
       let bytes: number[];
       if (fmt.value === "docx") {

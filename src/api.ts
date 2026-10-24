@@ -274,6 +274,8 @@ export const api = {
     call<string>("pdf_export", { title, body, dest }),
   epubExport: (title: string, chapters: { title: string; html: string }[], dest: string) =>
     call<null>("epub_export", { title, chapters, dest }),
+  longimageExport: (html: string, dest: string, width?: number) =>
+    call<null>("longimage_export", { html, dest, width }),
   importRead: (path: string) => call<ImportedFile>("import_read", { path }),
   importDoc: (folder: string, filename: string, content: string) =>
     call<TreeNode>("import_doc", { folder, filename, content }),
