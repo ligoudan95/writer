@@ -844,3 +844,10 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
 .starred-item:hover { background: var(--bg); }
 .starred-item.active { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .tag-filter { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 10px 6px; }
+
+/* ===== V1.1：专注模式（F11） ===== */
+.app.focus .statusbar { opacity: 0; transition: opacity 0.25s; }
+.app.focus .statusbar:hover { opacity: 1; }
+.app.focus .toolbar { display: none; }
+.app.focus .doc-head .btn, .app.focus .doc-head .icon-btn { opacity: 0.25; }
+.app.focus .doc-head:hover .btn, .app.focus .doc-head:hover .icon-btn { opacity: 1; }

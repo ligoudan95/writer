@@ -190,7 +190,15 @@ async function onKey(e: KeyboardEvent) {
   // 输入保护（FR-UI-06）：任何编辑键都刷新"正在输入"时间戳
   markTyping();
   const ctrl = e.ctrlKey || e.metaKey;
-  if (!ctrl) return;
+  if (!ctrl) {
+    // F11 专注模式（V1.1）
+    if (e.key === "F11") {
+      e.preventDefault();
+      s.focusMode = !s.focusMode;
+      localStorage.setItem("writer.focus", s.focusMode ? "1" : "0");
+    }
+    return;
+  }
   const k = e.key.toLowerCase();
   if (k === "s") {
     e.preventDefault();
@@ -225,7 +233,7 @@ async function onKey(e: KeyboardEvent) {
       <p class="boot-err detail">{{ bootErr }}</p>
     </template>
   </div>
-  <div v-else class="app">
+  <div v-else class="app" :class="{ focus: s.focusMode }">
     <!-- 崩溃恢复横幅（FR-SAV-02） -->
     <div v-if="s.pendingRecovery.length" class="recovery">
       <div v-for="p in s.pendingRecovery" :key="p.path" class="recovery-row">
@@ -243,17 +251,17 @@ async function onKey(e: KeyboardEvent) {
     </div>
 
     <button
-      v-if="sidebarHidden"
+      v-if="sidebarHidden && !s.focusMode"
       class="side-peek icon-btn"
       title="展开文库侧栏"
       @click="toggleSidebar"
     >☰</button>
     <div class="mid">
-      <aside v-if="!sidebarHidden" class="sidebar" :style="{ width: sidebarW + 'px', flex: 'none' }">
+      <aside v-if="!sidebarHidden && !s.focusMode" class="sidebar" :style="{ width: sidebarW + 'px', flex: 'none' }">
         <DocTree @open-trash="trashOpen = true" @open-settings="openSettings()" />
       </aside>
       <div
-        v-if="!sidebarHidden"
+        v-if="!sidebarHidden && !s.focusMode"
         class="splitter"
         title="拖动调整宽度"
         @mousedown.prevent="startDrag('sidebar')"

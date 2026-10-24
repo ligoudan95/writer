@@ -469,6 +469,12 @@ function removeLineIndent() {
 
 // ---------------------------------------------------------------------------
 // 稿纸模式（字符网格：纵向每 1em 一线、横向每行一线，缩进与占位一目了然）
+
+// 专注模式（V1.1，F11）：隐藏侧栏/工具栏，状态栏淡化悬停浮现
+function toggleFocus() {
+  s.focusMode = !s.focusMode;
+  localStorage.setItem("writer.focus", s.focusMode ? "1" : "0");
+}
 // ---------------------------------------------------------------------------
 
 const gridOn = ref(localStorage.getItem("writer.grid") !== "0");
@@ -674,7 +680,7 @@ watch(
       </div>
 
       <!-- 格式工具栏 -->
-      <div class="toolbar">
+      <div v-show="!s.focusMode" class="toolbar">
         <button
           v-for="l in LEVELS"
           :key="'h' + l"
@@ -723,6 +729,9 @@ watch(
         </template>
         <button class="tool" :class="{ on: gridOn }" title="稿纸模式（横线本 + 缩进参考线）" @click="toggleGrid">
           稿纸
+        </button>
+        <button class="tool" :class="{ on: s.focusMode }" title="专注模式（F11：隐藏侧栏/工具栏，状态栏悬停浮现）" @click="toggleFocus()">
+          专注
         </button>
       </div>
 

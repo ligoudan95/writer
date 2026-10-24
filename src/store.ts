@@ -36,6 +36,8 @@ export const s = reactive({
   reloadNonce: 0,
   /** 全文搜索定位词（FR-SEARCH-01）：打开文档后由编辑器消费一次（光标+滚动到命中） */
   pendingLocate: "",
+  /** 专注模式（V1.1，F11）：隐藏侧栏/工具栏，状态栏悬停浮现 */
+  focusMode: localStorage.getItem("writer.focus") === "1",
   // 云同步（FR-SYN，M3）
   sync: {
     phase: "idle" as string, // idle | scanning | planning | executing | settling
