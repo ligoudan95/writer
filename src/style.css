@@ -870,3 +870,22 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
 }
 .cp-tpl-item:hover { color: var(--fg); border-color: var(--accent); }
 .cp-tpl-empty { font-size: 11.5px; color: var(--fg-dim); }
+
+/* ===== V1.2：大纲视图 ===== */
+.outline-panel {
+  position: fixed; left: 14px; top: 76px; z-index: 55;
+  width: min(300px, 30vw); max-height: 60vh; display: flex; flex-direction: column;
+  background: var(--bg-editor); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18); overflow: hidden;
+}
+.outline-list { overflow-y: auto; padding: 6px; }
+.outline-item {
+  position: relative; display: flex; gap: 6px; align-items: baseline;
+  padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 12.5px;
+}
+.outline-item:hover { background: var(--bg); }
+.outline-lv { color: var(--fg-dim); font-size: 10px; flex: none; }
+.outline-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outline-line { position: absolute; left: 6px; right: 6px; height: 2px; background: var(--accent); border-radius: 1px; }
+.outline-line.before { top: -2px; }
+.outline-line.after { bottom: -2px; }

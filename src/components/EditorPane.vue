@@ -651,6 +651,51 @@ function diffLabel(words: number) {
   return "与当前相同";
 }
 
+// 大纲视图与拖拽排序（V1.2）：章节区块 = 标题起至下一同级/更高级标题前
+const outlineOpen = ref(false);
+const outline = computed(() => {
+  if (!outlineOpen.value) return [];
+  const hs: { level: number; pos: number }[] = [];
+  editor.state.doc.descendants((node, pos) => {
+    if (node.type.name === "heading") hs.push({ level: Number(node.attrs.level ?? 1), pos });
+    return true;
+  });
+  const size = editor.state.doc.content.size;
+  return hs.map((h, i) => {
+    let to = size;
+    for (let j = i + 1; j < hs.length; j++) {
+      if (hs[j].level <= h.level) {
+        to = hs[j].pos;
+        break;
+      }
+    }
+    const node = editor.state.doc.nodeAt(h.pos);
+    return { id: i, level: h.level, text: node?.textContent ?? "(空标题)", from: h.pos, to };
+  });
+});
+function outlineJump(o: { from: number }) {
+  editor.chain().setTextSelection(o.from).scrollIntoView().run();
+}
+const outlineDrag = ref(-1);
+const outlineDrop = ref<{ id: number; mode: "" | "before" | "after" }>({ id: -1, mode: "" });
+function moveSection(srcId: number, dstId: number, mode: "before" | "after") {
+  const list = outline.value;
+  const src = list.find((x) => x.id === srcId);
+  const dst = list.find((x) => x.id === dstId);
+  if (!src || !dst || srcId === dstId) return;
+  const tr = editor.state.tr;
+  const slice = editor.state.doc.slice(src.from, src.to);
+  let insertAt = mode === "before" ? dst.from : dst.to;
+  // 位置修正：删除源后，源之后的插入点前移
+  const len = src.to - src.from;
+  if (insertAt >= src.to) insertAt -= len;
+  else if (insertAt > src.from) return; // 拖进自己的区块内：无效操作
+  tr.delete(src.from, src.to);
+  tr.insert(insertAt, slice.content);
+  editor.view.dispatch(tr);
+  scheduleSave();
+}
+
 // 快照 diff 视图（V1.2）：快照 vs 当前正文，块级增删预览
 const historyDiff = computed(() => {
   if (!s.history.preview) return [];
@@ -762,9 +807,44 @@ watch(
         <button class="tool" :class="{ on: gridOn }" title="稿纸模式（横线本 + 缩进参考线）" @click="toggleGrid">
           稿纸
         </button>
+        <button class="tool" :class="{ on: outlineOpen }" title="大纲（章节导航与拖拽排序）" @click="outlineOpen = !outlineOpen">
+          大纲
+        </button>
         <button class="tool" :class="{ on: s.focusMode }" title="专注模式（F11：隐藏侧栏/工具栏，状态栏悬停浮现）" @click="toggleFocus()">
           专注
         </button>
+      </div>
+
+      <!-- 大纲视图（V1.2）：章节树 + 点击定位 + 拖拽排序 -->
+      <div v-if="outlineOpen" class="outline-panel">
+        <div class="history-head">
+          <span class="history-title">大纲</span>
+          <span style="flex: 1"></span>
+          <button class="icon-btn" @click="outlineOpen = false">✕</button>
+        </div>
+        <div class="outline-list">
+          <div
+            v-for="o in outline"
+            :key="o.id"
+            class="outline-item"
+            :style="{ paddingLeft: 8 + (o.level - 1) * 14 + 'px' }"
+            draggable="true"
+            @dragstart="outlineDrag = o.id"
+            @dragover.prevent="outlineDrop = { id: o.id, mode: ($event as DragEvent).offsetY < ($event.currentTarget as HTMLElement).offsetHeight / 2 ? 'before' : 'after' }"
+            @dragleave="outlineDrop = { id: -1, mode: '' }"
+            @drop.prevent="moveSection(outlineDrag, o.id, outlineDrop.mode === 'after' ? 'after' : 'before')"
+            @click="outlineJump(o)"
+          >
+            <span class="outline-lv">{{ o.level }}</span>
+            <span class="outline-text">{{ o.text }}</span>
+            <span
+              v-if="outlineDrop.id === o.id"
+              class="outline-line"
+              :class="outlineDrop.mode"
+            ></span>
+          </div>
+          <div v-if="!outline.length" class="history-empty">文档暂无标题（用 # 起章后可在此拖拽排序）</div>
+        </div>
       </div>
 
       <!-- 表格浮动工具条（FR-EDT-09：表格编辑的操作载体） -->
