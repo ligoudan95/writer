@@ -59,6 +59,54 @@ async function saveNet() {
   }
 }
 
+// -- 库体检（FR-DOC-07） ----------------------------------------------------------
+interface HealthIssue {
+  kind: string;
+  path: string;
+  detail: string;
+  fixable: boolean;
+}
+const healthIssues = ref<HealthIssue[] | null>(null);
+const healthBusy = ref(false);
+const healthFixReport = ref<string[] | null>(null);
+
+async function runHealthCheck() {
+  healthBusy.value = true;
+  healthFixReport.value = null;
+  try {
+    healthIssues.value = await api.healthCheck();
+  } finally {
+    healthBusy.value = false;
+  }
+}
+
+async function runHealthFix() {
+  if (!healthIssues.value) return;
+  healthBusy.value = true;
+  try {
+    const fixable = healthIssues.value.filter((i) => i.fixable);
+    const r = await api.healthFix(fixable);
+    healthFixReport.value = [
+      `已自动备份：${r.backup}`,
+      ...r.fixed.map((f) => `✓ ${f}`),
+      ...r.skipped.map((sk) => `△ ${sk}`),
+    ];
+    healthIssues.value = await api.healthCheck();
+  } finally {
+    healthBusy.value = false;
+  }
+}
+
+const HEALTH_KIND: Record<string, string> = {
+  missing_id: "缺文档 id",
+  dup_id: "uuid 重复",
+  bad_encoding: "编码异常",
+  index_stale: "索引过期",
+  stale_lock: "锁残留",
+  orphan_attachment: "孤儿附件",
+  tombstone_corrupt: "墓碑清单损坏",
+};
+
 // -- 备份与诊断 ----------------------------------------------------------------
 const backups = ref<{ name: string; size: number; ts: number }[]>([]);
 const includeAttachments = ref(false);
@@ -313,6 +361,30 @@ function toggleUpdateAuto() {
           <div class="sd-row" style="gap: 8px; margin-top: 12px">
             <button class="btn small" @click="openLogs">打开日志目录</button>
             <button class="btn small" @click="exportDiagnostics">导出诊断包（脱敏）…</button>
+            <button class="btn small" :disabled="healthBusy" @click="runHealthCheck">
+              {{ healthBusy ? "体检中…" : "库体检…" }}
+            </button>
+          </div>
+          <!-- 库体检结果（FR-DOC-07） -->
+          <div v-if="healthIssues" class="sd-list" style="max-height: 220px">
+            <div v-for="(i, idx) in healthIssues" :key="idx" class="sd-item">
+              <span :title="i.detail">
+                {{ HEALTH_KIND[i.kind] ?? i.kind }} · {{ i.path }}
+                {{ i.fixable ? "" : "（不可自动修复）" }}
+              </span>
+              <span class="muted">{{ i.fixable ? "可修复" : "人工处理" }}</span>
+            </div>
+            <div v-if="!healthIssues.length" class="sd-item"><span>✓ 一切正常</span><span class="muted">0 项问题</span></div>
+          </div>
+          <div v-if="healthIssues?.some((i) => i.fixable)" class="sd-row" style="gap: 8px">
+            <button class="btn small primary" :disabled="healthBusy" @click="runHealthFix">
+              一键修复（先自动备份）
+            </button>
+          </div>
+          <div v-if="healthFixReport" class="sd-list" style="max-height: 160px">
+            <div v-for="(line, idx) in healthFixReport" :key="idx" class="sd-item">
+              <span>{{ line }}</span>
+            </div>
           </div>
           <div class="sd-sub">日志滚动保留 7 天；诊断包不含正文、API Key 与密码。</div>
         </div>

@@ -160,6 +160,12 @@ export interface StatsSummary {
   weekTotal: number;
   monthTotal: number;
 }
+export interface HealthIssue {
+  kind: string;
+  path: string;
+  detail: string;
+  fixable: boolean;
+}
 
 // -- 网络出口（M5.1：AI 与 WebDAV 共用；默认直连绕过系统代理） ------------------
 
@@ -277,4 +283,8 @@ export const api = {
   // 写作目标与统计（FR-STAT-01/02）
   statsSummary: () => call<StatsSummary>("stats_summary"),
   statsSetGoal: (goal: number) => call<number>("stats_set_goal", { goal }),
+  // 库体检与修复（FR-DOC-07）
+  healthCheck: () => call<HealthIssue[]>("health_check"),
+  healthFix: (issues: HealthIssue[]) =>
+    call<{ fixed: string[]; skipped: string[]; backup: string }>("health_fix", { issues }),
 };

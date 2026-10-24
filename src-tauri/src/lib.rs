@@ -5,6 +5,7 @@ mod dav;
 mod db;
 mod docx_import;
 mod frontmatter;
+mod health;
 mod library;
 mod netcfg;
 mod pdf;
@@ -455,6 +456,20 @@ fn search_rebuild(state: State<AppState>) -> CmdResult<usize> {
     let root = lib_root_of(&state)?;
     let conn = search::open(&root)?;
     Ok(search::rebuild(&conn, &root)?)
+}
+
+// -- 库体检与修复（FR-DOC-07，V1.1） ---------------------------------------------
+
+#[tauri::command]
+fn health_check(state: State<AppState>) -> CmdResult<Vec<health::HealthIssue>> {
+    let root = lib_root_of(&state)?;
+    Ok(health::check(&root))
+}
+
+#[tauri::command]
+fn health_fix(state: State<AppState>, issues: Vec<health::HealthIssue>) -> CmdResult<health::FixReport> {
+    let root = lib_root_of(&state)?;
+    Ok(health::fix_all(&root, &issues)?)
 }
 
 // -- 写作目标与统计（FR-STAT-01/02，V1.1） ---------------------------------------
@@ -1023,6 +1038,8 @@ pub fn run() {
             search_rebuild,
             stats_summary,
             stats_set_goal,
+            health_check,
+            health_fix,
             sync_test,
             sync_now,
             sync_status,
