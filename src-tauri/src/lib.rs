@@ -1178,6 +1178,81 @@ pub fn run() {
                     }
                 });
             }
+            // --ai-selftest <out.log>：无头跑通 AI 作业全链路（生产 run_chat_job + 事件
+            // + 真实 Provider），事件与结果落文件——诊断"卡住"类问题的实机手段
+            if let Some(pos) = std::env::args().position(|a| a == "--ai-selftest") {
+                let out = std::env::args().nth(pos + 1).unwrap_or_else(|| ".ai-selftest.log".into());
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use tauri::{Emitter, Listener};
+                    let events: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+                        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                    let t0 = std::time::Instant::now();
+                    let ev1 = events.clone();
+                    let _l1 = handle.listen("ai:thinking", move |e| {
+                        ev1.lock().unwrap().push(format!("THINKING {}", e.payload()));
+                    });
+                    let e2 = events.clone();
+                    let _l2 = handle.listen("ai:chunk", move |e| {
+                        e2.lock().unwrap().push(format!("CHUNK {}", e.payload()));
+                    });
+                    let e3 = events.clone();
+                    let _l3 = handle.listen("ai:done", move |e| {
+                        e3.lock().unwrap().push(format!("DONE {}", e.payload()));
+                    });
+                    let e4 = events.clone();
+                    let _l4 = handle.listen("ai:error", move |e| {
+                        e4.lock().unwrap().push(format!("ERROR {}", e.payload()));
+                    });
+                    let events2 = events.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(120));
+                        events2.lock().unwrap().push("WATCHDOG: 120s 超时仍未完成".into());
+                    });
+                    let job = ai::ChatJob {
+                        id: "selftest".into(),
+                        kind: "chat".into(),
+                        provider: crate::db::AiProvider {
+                            id: "selftest".into(),
+                            name: "selftest".into(),
+                            base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
+                            model: "glm-5.3".into(),
+                            enabled: true,
+                            stream: true,
+                            is_default: false,
+                        },
+                        api_key: std::env::var("WRITER_GLM_KEY").unwrap_or_default(),
+                        messages: vec![ai::ChatMsg {
+                            role: "user".into(),
+                            content: "用一句话介绍李白".into(),
+                        }],
+                        lib_root: std::path::PathBuf::from("."),
+                    };
+                    let st = std::sync::Arc::new(ai::AiState::new());
+                    // 复刻 ai_chat_start：async_runtime::spawn（生产路径）
+                    let h2 = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        ai::run_chat_job(st, h2, job).await;
+                    });
+                    // 轮询等完成（DONE/ERROR 事件入列即止）
+                    let mut final_wait = 0;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        final_wait += 500;
+                        let done = events.lock().unwrap().iter().any(|e| e.starts_with("DONE") || e.starts_with("ERROR"));
+                        if done || final_wait > 180_000 {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let mut all = events.lock().unwrap().clone();
+                    all.insert(0, format!("TOTAL {}s", t0.elapsed().as_secs_f32()));
+                    let _ = std::fs::write(&out, all.join("
+"));
+                    println!("AI_SELFTEST_DONE {}", out);
+                    handle.exit(0);
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

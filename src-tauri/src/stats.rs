@@ -289,6 +289,7 @@ pub fn refresh_manifest(root: &Path) -> Result<StatsManifest, AppError> {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StatsSummary {
     /// 并集后的 每日增量（近 400 天）
     pub days: Vec<(String, i64)>,

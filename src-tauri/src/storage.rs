@@ -43,6 +43,7 @@ fn count_entries(dir: &Path, filter: impl Fn(&str) -> bool) -> (usize, u64) {
 }
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageInfo {
     pub snapshots_count: usize,
     pub snapshots_bytes: u64,

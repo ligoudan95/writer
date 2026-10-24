@@ -158,6 +158,7 @@ pub struct DocPayload {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct WriteResult {
     pub path: String,
     pub hash: String,

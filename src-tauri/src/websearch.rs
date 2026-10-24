@@ -14,6 +14,7 @@ pub struct WebResult {
 }
 
 #[derive(serde::Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct WebSearchConfigView {
     /// "" = 未配置；tavily | bocha | custom
     pub provider: String,

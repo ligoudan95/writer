@@ -472,6 +472,7 @@ pub struct ConflictInfo {
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncReport {
     pub uploaded: usize,
     pub downloaded: usize,

@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use crate::library::AppError;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptTemplate {
     pub id: i64,
     pub name: String,
@@ -197,7 +198,7 @@ mod tests {
         let json = export_json(&root).unwrap();
         let n = import_json(&root, &json).unwrap();
         assert_eq!(n, 0, "同名全部跳过（幂等）");
-        let n2 = import_json(&root, r#"[{"id":0,"name":"外来","category":"chat","content":"x","is_builtin":false}]"#).unwrap();
+        let n2 = import_json(&root, r#"[{"id":0,"name":"外来","category":"chat","content":"x","isBuiltin":false}]"#).unwrap();
         assert_eq!(n2, 1);
         let _ = std::fs::remove_dir_all(&root);
     }

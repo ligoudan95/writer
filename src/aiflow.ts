@@ -181,6 +181,7 @@ export async function initAi() {
     );
     un.push(
       await listen<{ jobId: string; kind: string; text: string }>("ai:thinking", (e) => {
+
         // 思考流增量（仅讨论面板外显；润色/续写保持状态简化）
         if (e.payload.kind !== "chat" || e.payload.jobId !== ai.chat.jobId) return;
         ai.chat.thinkText += e.payload.text;
@@ -189,6 +190,7 @@ export async function initAi() {
     );
     un.push(
       await listen<{ jobId: string; kind: string; content: string }>("ai:done", (e) => {
+
         const p = e.payload;
         // jobId 门控：切换文档/新作业后到达的陈旧事件不得污染当前状态
         ai.chat.thinking = false;
@@ -199,6 +201,7 @@ export async function initAi() {
     );
     un.push(
       await listen<{ jobId: string; kind: string; code: string; message: string }>("ai:error", (e) => {
+
         const p = e.payload;
         const msg = `[${p.code}] ${p.message}`;
         ai.chat.thinking = false;

@@ -76,6 +76,7 @@ pub struct ChatMsg {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]  // job_id to jobId; undefined jobId gated out ALL ai events (root cause of stuck AI)
 pub struct ChatStartAck {
     pub job_id: String,
     /// 预计发送字数（上下文 + 指令），用于发送前面板展示（FR-AI-03 上下文规范）
