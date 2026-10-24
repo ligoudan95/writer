@@ -163,12 +163,26 @@ function safeUrl(u: string | null | undefined): string {
   return s; // 相对路径 / 锚点
 }
 
+/** 图片方言（FR-EDT-11，V1.2）：alt 尾部 |w:NN|a:l|c|r 编码宽度百分比与对齐；
+ * 标准 Markdown 阅读器只会看到稍长的 alt 文本，语法兼容 */
 function imageNode(t: Tokens.Image): PMNode | null {
   const src = safeUrl(t.href);
   if (!src) return null; // 非法协议的图片整节点拒绝
+  let alt = t.text ?? "";
+  let width: number | null = null;
+  let align: string | null = null;
+  alt = alt.replace(/\|w:(\d{1,3})/g, (_m, n) => {
+    const v = Number(n);
+    if (v >= 25 && v <= 100) width = v;
+    return "";
+  });
+  alt = alt.replace(/\|a:([lcr])/g, (_m, a) => {
+    align = a;
+    return "";
+  });
   return {
     type: "image",
-    attrs: { src, alt: t.text ?? null, title: t.title ?? null },
+    attrs: { src, alt: alt || null, title: t.title ?? null, width, align },
   };
 }
 

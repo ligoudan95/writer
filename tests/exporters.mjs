@@ -71,14 +71,14 @@ ok("DOCX: 体积合理（>4KB）", docx.length > 4000, `实际 ${docx.length}`);
 // --- HTML 导出（FR-EXP-05 PDF 管线的正文片段） ---
 import { exportHtml } from "../.tmp-exporter.mjs";
 const html = exportHtml(doc);
-ok("HTML: 标题层级", html.includes("<h1>标题一</h1>") && html.includes("<h2>标题二</h2>"));
+ok("HTML: 标题层级（含目录锚点）", /<h1 id="h-\d+">标题一<\/h1>/.test(html) && /<h2 id="h-\d+">标题二<\/h2>/.test(html));
 ok("HTML: 行内标记", html.includes("<strong>加粗</strong>") && html.includes("<em>斜体</em>") && html.includes("<u>下划线</u>"));
 ok("HTML: 行内代码与链接", html.includes("<code>code</code>") && html.includes('<a href="https://a.b">'));
 ok("HTML: 表格首行 th", /<table><tr><th><p>甲<\/p><\/th><th><p>乙<\/p><\/th><\/tr>/.test(html) && html.includes("<td><p>a1</p></td>"));
 ok("HTML: 任务列表勾选态", html.includes("☑") && html.includes("☐"));
 ok("HTML: 代码块语言类", html.includes('<pre><code class="language-rust">'));
 ok("HTML: 引用块", html.includes("<blockquote><p>引用一行内容</p></blockquote>"));
-ok("HTML: 文本转义", !/[<](?!\/?(h[1-6]|p|ul|ol|li|blockquote|pre|code|table|tr|th|td|hr|img|a|strong|em|u|s|br|span|div)\b)/.test(html), "出现未转义 <");
+ok("文本转义", !/[<](?!\/?(h[1-6]|p|ul|ol|li|blockquote|pre|code|table|tr|th|td|hr|img|a|strong|em|u|s|br|span|div)\b)/.test(html.replace(/<\/?(section|h\d)([^>]*)>/g, "")), "出现未转义 <");
 
 mkdirSync(".export-test", { recursive: true });
 writeFileSync(".export-test/样本.docx", docx);

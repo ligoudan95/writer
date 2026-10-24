@@ -539,6 +539,9 @@ const t = reactive({
   quote: false,
   codeblock: false,
   inTable: false,
+  inImage: false,
+  imgWidth: 0,
+  imgAlign: "",
   hasSel: false,
 });
 
@@ -557,10 +560,50 @@ function syncToolbarState() {
   t.quote = editor.isActive("blockquote");
   t.codeblock = editor.isActive("codeBlock");
   t.inTable = editor.isActive("table");
+  t.inImage = editor.isActive("image");
+  t.imgWidth = Number(editor.getAttributes("image").width) || 0;
+  t.imgAlign = String(editor.getAttributes("image").align ?? "");
   t.hasSel = !editor.state.selection.empty;
 }
 
 const c = () => editor.chain().focus();
+
+// 图片操作（FR-EDT-11，V1.2）
+const imgPreview = ref("");
+function setImgWidth(w: number) {
+  c().updateAttributes("image", { width: w }).run();
+}
+function setImgAlign(a: string) {
+  const cur = String(editor.getAttributes("image").align ?? "");
+  c().updateAttributes("image", { align: cur === a ? null : a }).run();
+}
+function previewImage() {
+  imgPreview.value = String(editor.getAttributes("image").src ?? "");
+}
+async function saveImageAs() {
+  const src = String(editor.getAttributes("image").src ?? "");
+  if (!src) return;
+  try {
+    const { readFile, writeFile } = await import("@tauri-apps/plugin-fs");
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const ext = src.split(".").pop()?.split("?")[0] ?? "png";
+    const dest = await save({ defaultPath: `writer-image.${ext}` });
+    if (!dest) return;
+    // 仅支持本地路径（http 外链另存为需网络下载，V1 不做）
+    if (!/^(attachments\/|[A-Za-z]:\|\\)/.test(src) && !src.startsWith("attachments")) {
+      s.toast = { msg: "仅支持本地库内图片另存（外链请右键浏览器保存）" };
+      setTimeout(() => (s.toast = null), 3500);
+      return;
+    }
+    const data = await readFile(src);
+    await writeFile(dest, data);
+    s.toast = { msg: "图片已另存" };
+    setTimeout(() => (s.toast = null), 2500);
+  } catch (e) {
+    s.toast = { msg: `另存失败：${(e as { message?: string }).message ?? e}` };
+    setTimeout(() => (s.toast = null), 4000);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 标题 / 字数
@@ -845,6 +888,29 @@ watch(
           </div>
           <div v-if="!outline.length" class="history-empty">文档暂无标题（用 # 起章后可在此拖拽排序）</div>
         </div>
+      </div>
+
+      <!-- 图片浮动操作条（FR-EDT-11，V1.2） -->
+      <div v-if="t.inImage" class="tablebar">
+        <button
+          v-for="w in [25, 50, 75, 100]"
+          :key="w"
+          class="tool"
+          :class="{ on: t.imgWidth === w }"
+          @click="setImgWidth(w)"
+        >{{ w }}%</button>
+        <span class="sep" />
+        <button class="tool" :class="{ on: t.imgAlign === 'l' }" title="左对齐" @click="setImgAlign('l')">⇤</button>
+        <button class="tool" :class="{ on: t.imgAlign === 'c' }" title="居中" @click="setImgAlign('c')">↔</button>
+        <button class="tool" :class="{ on: t.imgAlign === 'r' }" title="右对齐" @click="setImgAlign('r')">⇥</button>
+        <span class="sep" />
+        <button class="tool" title="放大查看" @click="previewImage">🔍</button>
+        <button class="tool" title="另存为" @click="saveImageAs">💾</button>
+      </div>
+
+      <!-- 图片放大预览 -->
+      <div v-if="imgPreview" class="modal-mask" @click.self="imgPreview = ''">
+        <img :src="imgPreview" class="img-preview" @click="imgPreview = ''" />
       </div>
 
       <!-- 表格浮动工具条（FR-EDT-09：表格编辑的操作载体） -->

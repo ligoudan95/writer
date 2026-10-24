@@ -138,7 +138,7 @@ function inlineHtml(nodes: PMNode[]): string {
     } else if (n.type === "hardBreak") {
       out += "<br>";
     } else if (n.type === "image") {
-      out += `<img src="${escAttr(String(n.attrs?.src ?? ""))}" alt="">`;
+      out += `<img src="${escAttr(String(n.attrs?.src ?? ""))}" alt=""${imgAttrsOf(n)}>`;
     } else if (n.content) {
       out += inlineHtml(n.content);
     }
@@ -186,6 +186,16 @@ export interface PdfOptions {
   title?: string;
 }
 
+const imgAttrsOf = (n: PMNode): string => {
+  const w = Number(n.attrs?.width);
+  const parts: string[] = [];
+  if (w >= 25 && w <= 100) parts.push(`width:${w}%`);
+  const align = String(n.attrs?.align ?? "");
+  if (["l", "c", "r"].includes(align)) {
+    parts.push(`display:block;margin:${align === "c" ? "0 auto" : align === "r" ? "0 0 0 auto" : "0 auto 0 0"}`);
+  }
+  return parts.length ? ` style="${parts.join(";")}"` : "";
+};
 export function exportHtml(doc: PMNode, lt?: ExportLayout, pdf?: PdfOptions): string {
   const out: string[] = [];
   // 标题锚点（目录跳转用）：稳定序号
@@ -207,14 +217,16 @@ export function exportHtml(doc: PMNode, lt?: ExportLayout, pdf?: PdfOptions): st
     );
   }
   const headings: { lv: number; html: string }[] = [];
+  let idx = 0;
   for (const n of doc.content ?? []) {
     if (n.type === "heading") {
       const lv = Math.min(Math.max(Number(n.attrs?.level ?? 1), 1), 6);
-      if (lv <= 2) tocItems.push({ lv, text: textOf(n), anchor: anchorOf(headings.length) });
+      if (lv <= 2) tocItems.push({ lv, text: textOf(n), anchor: anchorOf(idx) });
       headings.push({ lv, html: inlineHtml(n.content ?? []) });
     } else {
       headings.push({ lv: 0, html: "" });
     }
+    idx++;
   }
   if (pdf?.toc && tocItems.length) {
     out.push(`<section class="pdf-toc"><h1 class="toc-title">目录</h1><ul>`);
@@ -225,13 +237,12 @@ export function exportHtml(doc: PMNode, lt?: ExportLayout, pdf?: PdfOptions): st
     }
     out.push(`</ul></section>`);
   }
-  let k = 0;
+  let pos = 0;
   for (const n of doc.content ?? []) {
     switch (n.type) {
       case "heading": {
-        const lv = headings[k].lv;
-        out.push(`<h${lv} id="${anchorOf(k)}">${headings[k].html}</h${lv}>`);
-        k++;
+        const lv = headings[pos].lv;
+        out.push(`<h${lv} id="${anchorOf(pos)}">${headings[pos].html}</h${lv}>`);
         break;
       }
       case "paragraph":
@@ -282,9 +293,10 @@ export function exportHtml(doc: PMNode, lt?: ExportLayout, pdf?: PdfOptions): st
         out.push("<hr>");
         break;
       case "image":
-        out.push(`<img src="${escAttr(String(n.attrs?.src ?? ""))}" alt="">`);
+        out.push(`<img src="${escAttr(String(n.attrs?.src ?? ""))}" alt=""${imgAttrsOf(n)}>`);
         break;
     }
+    pos++;
   }
   const html = out.join("\n");
   return lt ? html + "</div>" : html;
