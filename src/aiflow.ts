@@ -120,6 +120,8 @@ export const ai = reactive({
 
   /** 最近一次请求的上下文字符量（发送前预览口径，面板展示） */
   lastRequestChars: 0,
+  /** 思考模型进行中（V1.3.1）：jobId → 已思考字数（0/无 = 非思考期） */
+  thinking: {} as Record<string, number>,
 });
 
 export function defaultProvider(): AiProvider | null {
@@ -176,9 +178,21 @@ export async function initAi() {
       }),
     );
     un.push(
+      await listen<{ jobId: string; kind: string; chars: number }>("ai:thinking", (e) => {
+        // 思考模型进度（GLM-5.3 等）：chars=0 表示思考结束进入正文
+        const p = e.payload;
+        if (p.chars === 0) {
+          delete ai.thinking[p.jobId];
+        } else {
+          ai.thinking[p.jobId] = p.chars;
+        }
+      }),
+    );
+    un.push(
       await listen<{ jobId: string; kind: string; content: string }>("ai:done", (e) => {
         const p = e.payload;
         // jobId 门控：切换文档/新作业后到达的陈旧事件不得污染当前状态
+        delete ai.thinking[p.jobId];
         if (p.kind === "polish" && p.jobId === ai.polish.jobId) onPolishDone(p.content);
         else if (p.kind === "continue" && p.jobId === ai.cont.jobId) onContinueDone();
         else if (p.kind === "chat" && p.jobId === ai.chat.jobId) onChatDone(p.content);
@@ -188,6 +202,7 @@ export async function initAi() {
       await listen<{ jobId: string; kind: string; code: string; message: string }>("ai:error", (e) => {
         const p = e.payload;
         const msg = `[${p.code}] ${p.message}`;
+        delete ai.thinking[p.jobId];
         if (p.kind === "polish" && p.jobId === ai.polish.jobId) {
           ai.polish.state = "idle";
           ai.polish.error = msg;
@@ -214,6 +229,7 @@ export async function initAi() {
         // 按 kind + jobId 收尾：迟到的取消事件不得复位新作业的状态
         //（cancelled 在流循环收到下一个 SSE 项时才发出，可晚于新作业启动数秒）
         const p = e.payload;
+        delete ai.thinking[p.jobId];
         if (p.kind === "polish" && p.jobId === ai.polish.jobId && ai.polish.state === "running") {
           ai.polish.state = "idle";
         } else if (p.kind === "continue" && p.jobId === ai.cont.jobId && ai.cont.state === "running") {

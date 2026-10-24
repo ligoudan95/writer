@@ -100,6 +100,9 @@ function retryChat() {
         </div>
       </div>
       <div v-if="ai.chat.streaming" class="cp-msg assistant">
+        <div v-if="ai.thinking[ai.chat.jobId]" class="cp-thinking">
+          <span class="cp-thinking-dot" /> 思考中…已思考 {{ ai.thinking[ai.chat.jobId] }} 字
+        </div>
         <div class="cpm-body streaming">{{ ai.chat.streamText || "…" }}</div>
       </div>
       <div v-if="!ai.chat.messages.length && !ai.chat.streaming" class="cp-empty">
@@ -134,7 +137,7 @@ function retryChat() {
         @keydown.ctrl.enter.prevent="send"
       ></textarea>
       <button class="btn small primary" :disabled="ai.chat.streaming || !defaultProvider()" @click="send">
-        {{ ai.chat.streaming ? "回复中…" : "发送" }}
+        {{ ai.chat.streaming ? (ai.thinking[ai.chat.jobId] ? "思考中…" : "回复中…") : "发送" }}
       </button>
     </div>
   </aside>

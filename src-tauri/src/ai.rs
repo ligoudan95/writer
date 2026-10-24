@@ -13,6 +13,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 
 use crate::db::AiProvider;
 use crate::library::AppError;
@@ -51,10 +52,11 @@ impl AiState {
 }
 
 fn build_client(cfg: &crate::netcfg::NetConfig) -> reqwest::Client {
+    // 不设 total timeout：思考模型（GLM-5.3 等）思考期持续流式输出可达数分钟，
+    // 总超时会误杀——改由 chat_once 的流式空闲看门狗（120s 无字节）与非流式
+    // 显式超时承担（2026-10-24 用户实测"AI 卡住"根因）
     crate::netcfg::apply_async(
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
-            .connect_timeout(Duration::from_secs(15)),
+        reqwest::Client::builder().connect_timeout(Duration::from_secs(15)),
         cfg,
     )
     .build()
@@ -159,6 +161,18 @@ pub fn parse_delta(payload: &str) -> Result<Option<String>, AppError> {
         .and_then(|d| d.get("content"))
         .and_then(|c| c.as_str())
         .map(|s| s.to_string()))
+}
+
+/// 从 chat.completions chunk 中提取思考增量（GLM-5.3 等思考模型；
+/// 仅用于 UI 进度指示"思考中"，不进入正文）
+pub fn parse_reasoning(payload: &str) -> Option<String> {
+    let v = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    v.get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("delta"))
+        .and_then(|d| d.get("reasoning_content"))
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string())
 }
 
 /// 非流式响应提取完整回复
@@ -280,12 +294,29 @@ pub async fn run_chat_job(
     let ChatJob { id, kind, provider, api_key, messages, lib_root } = job;
     let cancel = Arc::new(AtomicBool::new(false));
     register_job(&state, id.clone(), cancel.clone());
-    let outcome = chat_once(&state.client(), &provider, &api_key, &messages, &cancel, |text| {
-        let _ = app.emit(
-            "ai:chunk",
-            serde_json::json!({ "jobId": id, "kind": kind, "text": text }),
-        );
-    })
+    let app2 = app.clone();
+    let id2 = id.clone();
+    let kind2 = kind.clone();
+    let outcome = chat_once(
+        &state.client(),
+        &provider,
+        &api_key,
+        &messages,
+        &cancel,
+        |text| {
+            let _ = app.emit(
+                "ai:chunk",
+                serde_json::json!({ "jobId": id, "kind": kind, "text": text }),
+            );
+        },
+        // 思考进度（GLM-5.3 等思考模型）：节流后回调，外显"思考中"指示
+        Some(Box::new(move |chars: u64| {
+            let _ = app2.emit(
+                "ai:thinking",
+                serde_json::json!({ "jobId": id2, "kind": kind2, "chars": chars }),
+            );
+        })),
+    )
     .await;
     unregister_job(&state, &id);
     match outcome {
@@ -311,7 +342,8 @@ pub async fn run_chat_job(
     let _ = lib_root; // 日志已在命令侧先行落库（无论成败，均记录发送事实）
 }
 
-/// 单次请求核心：流式开关 → SSE 消费/批聚 或 非流式单发
+/// 单次请求核心：流式开关 → SSE 消费/批聚 或 非流式单发。
+/// on_thinking：思考模型进度回调（None = 不关心）；流式空闲 120s 视为断连。
 async fn chat_once(
     client: &reqwest::Client,
     provider: &AiProvider,
@@ -319,6 +351,7 @@ async fn chat_once(
     messages: &[ChatMsg],
     cancel: &AtomicBool,
     mut emit_chunk: impl FnMut(&str),
+    mut on_thinking: Option<Box<dyn FnMut(u64) + Send>>,
 ) -> Result<String, AppError> {
     // 发起请求前先查取消（零网络发送，FR-AI-08）
     if cancel.load(Ordering::Acquire) {
@@ -351,24 +384,40 @@ async fn chat_once(
     }
 
     if !provider.stream {
-        let text = resp
-            .text()
+        // 非流式：思考模型可能 3-5 分钟，给足显式超时（client 已无 total timeout）
+        let text = tokio::time::timeout(Duration::from_secs(600), resp.text())
             .await
+            .map_err(|_| AppError::new("net_timeout", "非流式请求超过 600 秒，已中断"))?
             .map_err(|e| map_reqwest_err(&e))?;
         let content = parse_full_response(&text)?;
         emit_chunk(&content);
         return Ok(content);
     }
 
-    // 流式：SSE 增量 → 50ms 批量（B1）
+    // 流式：SSE 增量 → 50ms 批量（B1）；空闲看门狗 120s（思考模型持续输出不会误杀）
     use futures_util::StreamExt;
+    const IDLE_LIMIT: Duration = Duration::from_secs(120);
     let mut stream = resp.bytes_stream();
     let mut parser = SseParser::new();
     let mut full = String::new();
     let mut batch = String::new();
     let mut last_flush = Instant::now();
+    let mut reasoning_chars: u64 = 0;
+    let mut thinking_emitted = false; // 首个思考增量立即外显（用户感知），其后 1s 节流
+    let mut last_thinking_emit = Instant::now();
     let mut cancelled = false;
-    while let Some(item) = stream.next().await {
+    loop {
+        // 空闲看门狗：120s 无任何字节（含思考流）= 断连
+        let item = match tokio::time::timeout(IDLE_LIMIT, stream.next()).await {
+            Err(_) => {
+                return Err(AppError::new(
+                    "net_timeout",
+                    "连接空闲超过 120 秒（无任何数据），已中断",
+                ));
+            }
+            Ok(None) => break,
+            Ok(Some(item)) => item,
+        };
         if cancel.load(Ordering::Acquire) {
             cancelled = true;
             break; // drop stream → 连接断开（真实中断）
@@ -378,8 +427,27 @@ async fn chat_once(
             if payload == "[DONE]" {
                 break; // 服务器随后自然关流；此处提前结束解析即可
             }
+            // 思考增量：计入指示器（1s 节流外显），不进正文
+            if let Some(r) = parse_reasoning(&payload) {
+                reasoning_chars += r.chars().count() as u64;
+                if !thinking_emitted || last_thinking_emit.elapsed() >= Duration::from_secs(1) {
+                    if let Some(f) = on_thinking.as_mut() {
+                        f(reasoning_chars);
+                    }
+                    thinking_emitted = true;
+                    last_thinking_emit = Instant::now();
+                }
+                continue;
+            }
             match parse_delta(&payload) {
                 Ok(Some(delta)) => {
+                    // 首个正文到达：清思考指示（chars 归零事件）
+                    if reasoning_chars > 0 {
+                        if let Some(f) = on_thinking.as_mut() {
+                            f(0);
+                        }
+                        reasoning_chars = 0;
+                    }
                     full.push_str(&delta);
                     batch.push_str(&delta);
                 }
@@ -497,6 +565,17 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_extraction() {
+        assert_eq!(
+            parse_reasoning(r#"{"choices":[{"delta":{"reasoning_content":"思考中"}}]}"#).as_deref(),
+            Some("思考中")
+        );
+        // 正文 delta 不产 reasoning
+        assert_eq!(parse_reasoning(r#"{"choices":[{"delta":{"content":"正文"}}]}"#), None);
+        assert_eq!(parse_reasoning("not json"), None);
+    }
+
+    #[test]
     fn stream_error_event_attributed() {
         // 流中 error 事件：不再被吞掉
         let e = parse_delta(r#"{"error":{"message":"quota exceeded","code":429}}"#).unwrap_err();
@@ -552,7 +631,7 @@ mod tests {
             is_default: false,
         };
         let client = reqwest::Client::new();
-        let r = chat_once(&client, &provider, "k", &[], &cancel, |_t| {}).await;
+        let r = chat_once(&client, &provider, "k", &[], &cancel, |_t| {}, None).await;
         // 请求前先查取消：未发出任何网络请求即返回 ai_cancelled
         assert!(r.is_err());
         assert_eq!(r.unwrap_err().code, "ai_cancelled");
@@ -609,12 +688,61 @@ mod socket_tests {
         let c2 = collected.clone();
         let content = chat_once(&client, &provider, "k", &[], &cancel, move |t| {
             c2.lock().unwrap().push_str(t);
-        })
+        }, None)
         .await
         .unwrap();
         // 完整内容 = 各 delta 拼接（解析 + [DONE] 终止 + 聚合全对）
         assert_eq!(content, "你好，续写");
         assert_eq!(*collected.lock().unwrap(), content, "批聚推送的总和必须等于完整内容");
+    }
+
+    /// 思考模型流：reasoning_content 大量输出不进正文、不误判；正文照常拼接
+    #[tokio::test]
+    async fn chat_once_thinking_stream() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let body = concat!(
+                    "HTTP/1.1 200 OK
+Content-Type: text/event-stream
+
+",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"想一点\"}}]}
+
+",
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"再想一点\"}}]}
+
+",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"正文\"}}]}
+
+",
+                    "data: [DONE]
+
+",
+                );
+                let _ = sock.write_all(body.as_bytes());
+                let _ = sock.flush();
+            }
+        });
+        let provider = provider_for(&format!("http://127.0.0.1:{port}"), true);
+        let client = reqwest::Client::new();
+        let cancel = AtomicBool::new(false);
+        let think = std::sync::Arc::new(std::sync::Mutex::new(0u64));
+        let t2 = think.clone();
+        let content = chat_once(&client, &provider, "k", &[], &cancel, |_| {}, Some(Box::new(move |c: u64| {
+            // 取最大：正文到达时回调 f(0) 清指示器，最终值会归零
+            let mut m = t2.lock().unwrap();
+            if c > *m {
+                *m = c;
+            }
+        })))
+        .await
+        .unwrap();
+        assert_eq!(content, "正文", "思考内容不得进入正文");
+        assert!(*think.lock().unwrap() > 0, "思考回调应收到过非零累计字数");
     }
 
     #[tokio::test]
@@ -624,7 +752,7 @@ mod socket_tests {
         let provider = provider_for(&base, true);
         let client = reqwest::Client::new();
         let cancel = AtomicBool::new(true);
-        let r = chat_once(&client, &provider, "k", &[], &cancel, |_| {}).await;
+        let r = chat_once(&client, &provider, "k", &[], &cancel, |_| {}, None).await;
         assert_eq!(r.unwrap_err().code, "ai_cancelled");
         // 服务器线程未收到连接（1.5s 内无 accept）
         assert!(done.recv_timeout(Duration::from_millis(1500)).is_err(), "取消后不得产生任何网络请求（A7 精神）");

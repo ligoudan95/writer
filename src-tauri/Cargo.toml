@@ -42,10 +42,11 @@ windows = { version = "0.62", features = ["Win32_Security_Cryptography", "Win32_
 # PDF 渲染舱（FR-EXP-05）：WebView2 PrintToPdf COM 绑定，版本随 wry 锁定
 webview2-com = "0.39"
 windows-core = "0.62"
+# AI 流式空闲看门狗（tokio::time::timeout；原仅 dev-dep，2026-10-24 思考模型超时改造转入正式依赖）
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 # See the optimization guideline for more details: https://tauri.app/concept/size/
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
 
 [profile.release]
 codegen-units = 1
