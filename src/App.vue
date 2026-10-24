@@ -18,6 +18,7 @@ import { ai } from "./aiflow";
 import { initTheme } from "./theme";
 import { initLayout } from "./layout";
 import { markTyping } from "./notify";
+import { scheduleStartupCheck } from "./update";
 import {
   s,
   init,
@@ -142,6 +143,7 @@ onMounted(async () => {
       }, 1200);
     });
     window.addEventListener("keydown", onKey);
+    scheduleStartupCheck(); // FR-SET-02：启动检查更新（非模态，写作中不打扰）
   } catch (e: unknown) {
     const err = e as { code?: string; message?: string };
     bootErr.value = `[${err?.code ?? "error"}] ${err?.message ?? String(e)}`;

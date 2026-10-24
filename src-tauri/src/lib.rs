@@ -934,6 +934,8 @@ pub fn run() {
         .manage(std::sync::Arc::new(SyncRuntime::default()))
         .manage(std::sync::Arc::new(ai::AiState::new()))
         .manage(pdf::PdfState::default())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             use tauri::Manager;
             // --pdf-selftest <out.pdf>：无 UI 跑通 PDF 管线（分页→COM 打印→落盘）后退出

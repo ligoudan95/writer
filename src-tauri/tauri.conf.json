@@ -3,6 +3,15 @@
   "productName": "Writer",
   "version": "1.0.0",
   "identifier": "com.writer.desktop",
+  "plugins": {
+    "updater": {
+      "dialog": false,
+      "pubkey": "RWQG8y1TOq+118RC4vV5UwJ+dz1uFILWlXbET4t+aMJYg8GTqbGrEFS6",
+      "endpoints": [
+        "https://github.com/ligoudan95/writer/releases/latest/download/latest.json"
+      ]
+    }
+  },
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

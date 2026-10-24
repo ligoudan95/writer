@@ -12,6 +12,7 @@ import { api, type NetConfig } from "../api";
 import { theme, setTheme, type ThemeMode } from "../theme";
 import { layout, FONT_CANDIDATES, DEFAULT_LAYOUT } from "../layout";
 import { ai, toggleGlobal } from "../aiflow";
+import { checkUpdate, autoCheckEnabled, setAutoCheck } from "../update";
 import AiSettings from "./AiSettings.vue";
 import SyncSettings from "./SyncSettings.vue";
 
@@ -127,6 +128,22 @@ const fmtTime = (t: number) => {
 };
 
 const emit = defineEmits<{ (e: "close"): void }>();
+
+// -- 更新（FR-SET-02） -----------------------------------------------------------
+const updateBusy = ref(false);
+const updateAuto = ref(autoCheckEnabled());
+async function doCheckUpdate() {
+  updateBusy.value = true;
+  try {
+    await checkUpdate(true);
+  } finally {
+    updateBusy.value = false;
+  }
+}
+function toggleUpdateAuto() {
+  updateAuto.value = !updateAuto.value;
+  setAutoCheck(updateAuto.value);
+}
 </script>
 
 <template>
@@ -300,11 +317,24 @@ const emit = defineEmits<{ (e: "close"): void }>();
           <div class="sd-sub">日志滚动保留 7 天；诊断包不含正文、API Key 与密码。</div>
         </div>
 
-        <!-- 关于（FR-PKG-07 组件清单 + 信任声明） -->
+        <!-- 关于（FR-PKG-07 组件清单 + 信任声明；FR-SET-02 更新入口） -->
         <div v-if="tab === 'about'" class="sd-pane">
           <div class="sd-about">
             <div class="sd-name">Writer</div>
             <div class="muted">本地优先的个人写作软件 · V1.0</div>
+          </div>
+          <div class="sd-row" style="gap: 8px">
+            <button class="btn small" :disabled="updateBusy" @click="doCheckUpdate">
+              {{ updateBusy ? "检查中…" : "检查更新" }}
+            </button>
+            <label class="switch">
+              <input type="checkbox" :checked="updateAuto" @change="toggleUpdateAuto()" />
+              <span>启动时自动检查更新</span>
+            </label>
+          </div>
+          <div class="sd-sub">
+            更新提示一律非模态（通知中心），写作中永不打扰；安装前自动保存全部修改，
+            升级失败自动回滚，绝不触碰文库数据。
           </div>
           <div class="sd-sub">
             本地优先：全部文稿以明文 Markdown 存储在你的文库目录，随时可用任何编辑器打开迁出。
