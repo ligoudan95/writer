@@ -374,6 +374,9 @@ onMounted(() => {
   else updateCounts({ type: "doc", content: [] });
   editor.on("transaction", syncToolbarState);
   editor.on("transaction", updateSelectionCounts);
+  editor.on("transaction", () => {
+    docVersion.value++;
+  });
 });
 
 onBeforeUnmount(() => {
@@ -731,7 +734,12 @@ function jumpLint(hit: import("../api").LintHit) {
 
 // 大纲视图与拖拽排序（V1.2）：章节区块 = 标题起至下一同级/更高级标题前
 const outlineOpen = ref(false);
+// ProseMirror 的 state/doc 不是 Vue 响应式对象：computed 读取它不会建立依赖，
+// 只会在 outlineOpen 切换时算一次——之后编辑器任何变化都不刷新（过期快照），
+// 拖拽排序用过期位置会删改错误文本区间。用事务计数器驱动重算。
+const docVersion = ref(0);
 const outline = computed(() => {
+  docVersion.value; // 响应式依赖：每次编辑器事务自增，驱动本 computed 重算
   if (!outlineOpen.value) return [];
   const hs: { level: number; pos: number }[] = [];
   editor.state.doc.descendants((node, pos) => {
@@ -752,15 +760,29 @@ const outline = computed(() => {
   });
 });
 function outlineJump(o: { from: number }) {
-  editor.chain().setTextSelection(o.from).scrollIntoView().run();
+  editor.chain().focus().setTextSelection(o.from).scrollIntoView().run();
 }
 const outlineDrag = ref(-1);
 const outlineDrop = ref<{ id: number; mode: "" | "before" | "after" }>({ id: -1, mode: "" });
-function moveSection(srcId: number, dstId: number, mode: "before" | "after") {
+async function moveSection(srcId: number, dstId: number, mode: "before" | "after") {
   const list = outline.value;
   const src = list.find((x) => x.id === srcId);
   const dst = list.find((x) => x.id === dstId);
   if (!src || !dst || srcId === dstId) return;
+  const size = editor.state.doc.content.size;
+  if (src.from < 0 || src.to > size || dst.from > size || dst.to > size) return; // 过期防御
+  // 数据红线：拖拽整段移动属结构性改写，改前强制快照（失败即中止拖拽）
+  if (s.current) {
+    try {
+      await api.snapshotCreate(s.current.path, "pre_outline", "大纲拖拽前自动备份");
+    } catch (e) {
+      s.toast = { msg: `拖拽已取消：安全快照失败（${(e as { message?: string }).message ?? e}）` };
+      setTimeout(() => {
+        if (s.toast?.msg.startsWith("拖拽已取消")) s.toast = null;
+      }, 5000);
+      return;
+    }
+  }
   const tr = editor.state.tr;
   const slice = editor.state.doc.slice(src.from, src.to);
   let insertAt = mode === "before" ? dst.from : dst.to;
