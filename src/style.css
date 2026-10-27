@@ -65,7 +65,7 @@ button { font-family: inherit; }
 }
 .recovery { grid-column: 1 / -1; }
 .sidebar { grid-row: 2; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-side); border-right: 1px solid var(--border); }
-.main { grid-row: 2; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-editor); }
+.main { grid-row: 2; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-editor); min-height: 0; }
 .statusbar-host, footer.statusbar { grid-row: 3; grid-column: 1 / -1; }
 
 /* ===== 崩溃恢复横幅 ===== */
@@ -948,7 +948,14 @@ html[data-ed-indent="1"] .editor-scroll:not(.editor-grid) .editor-content .Prose
 .lint-ctx { font-size: 11.5px; color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
 
 /* ===== V1.3：分屏对照 ===== */
-.mid-main { flex: 1; display: flex; min-width: 0; }
+.mid-main {
+  flex: 1; display: flex; min-width: 0;
+  /* 关键：缺 min-height:0 时 flex 子项按内容撑高（min-height:auto），
+     粘贴长文后 .editor-scroll 被撑成全高、内部滚动失效，滚动被转嫁给
+     overflow:hidden 的外层容器——标题栏/工具栏滚出视野且滚不回（用户
+     报告"粘贴后无法翻页+上方UI丢失"）。0 值恢复高度约束链。 */
+  min-height: 0;
+}
 /* 编辑区在横向 flex 容器内必须显式伸展（V1.3-8 分屏容器引入后的回归修复：
    原直接挂 .main 纵向 flex 下靠 align-stretch 铺满，套层后塌缩为内容宽） */
 .mid-main > .editorpane { flex: 1 1 auto; min-width: 0; }
